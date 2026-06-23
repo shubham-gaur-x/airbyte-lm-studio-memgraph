@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+import json
+import os
+import time
+from typing import Optional
+
+import openai
+import structlog
+
+from transform_service.models import ExtractedMeeting
+from transform_service.utils import with_retry
+
+log = structlog.get_logger()
+
+_client: Optional[openai.AsyncOpenAI] = None
+
+_SYSTEM_PROMPT = """You are an expert meeting analyst. Extract structured information from meeting transcripts, emails, and calendar events.
+
+You MUST output ONLY valid JSON matching exactly this schema — no markdown, no explanation, just the JSON object:
+{
+  "title": "string — concise meeting title",
+  "kind": "meeting|email_thread|call|standup|review|other",
+  "platform": "string — e.g. Zoom, Google Meet, Slack, Email",
+  "date": "YYYY-MM-DD",
+  "start_time": "HH:MM or null",
+  "end_time": "HH:MM or null",
+  "duration_minutes": integer or null,
+  "location": "string or null",
+  "attendees": [{"name": "string", "email": "string", "role": "host|attendee|organizer"}],
+  "summary": "string — 2-3 sentence summary",
+  "topics": ["list of topic strings discussed"],
+  "decisions": ["list of decisions made"],
+  "action_items": [
+    {
+      "owner": "person name or email",
+      "task": "description of task",
+      "due": "YYYY-MM-DD or null",
+      "done": false,
+      "priority": "high|medium|low"
+    }
+  ],
+  "key_quotes": ["notable quotes, max 3"],
+  "links": ["URLs mentioned"],
+  "sentiment": "positive|neutral|negative|mixed",
+  "follow_up_needed": true|false,
+  "confidence": 0.0 to 1.0
+}
+
+If information is not present, use null or empty arrays. Never invent information not in the source text."""
+
+
+def _get_client() -> openai.AsyncOpenAI:
+    global _client
+    if _client is None:
+        _client = openai.AsyncOpenAI(
+            base_url=os.environ["LM_STUDIO_BASE_URL"],
+            api_key="lm-studio",
+        )
+    return _client
+
+
+@with_retry(max_attempts=3, base_delay=2.0)
+async def extract_meeting(text: str, source_type: str) -> Optional[ExtractedMeeting]:
+    client = _get_client()
+    model = os.environ["LM_STUDIO_MODEL"]
+    start = time.monotonic()
+
+    user_prompt = f"Extract meeting information from this {source_type}:\n\n{text}"
+
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            max_tokens=2000,
+        )
+    except openai.APIConnectionError as exc:
+        log.critical(
+            "extractor.lm_studio_unreachable",
+            source_type=source_type,
+            error=str(exc),
+            hint="Is LM Studio running at LM_STUDIO_BASE_URL with gemma3-12b loaded?",
+        )
+        raise
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+    raw = response.choices[0].message.content or ""
+
+    try:
+        data = json.loads(raw)
+        meeting = ExtractedMeeting.model_validate(data)
+    except Exception as exc:
+        log.error(
+            "extractor.parse_failed",
+            source_type=source_type,
+            duration_ms=duration_ms,
+            error=str(exc),
+            raw_snippet=raw[:200],
+        )
+        return None
+
+    log.info(
+        "extractor.success",
+        source_type=source_type,
+        text_length=len(text),
+        duration_ms=duration_ms,
+        confidence=meeting.confidence,
+        title=meeting.title,
+    )
+    return meeting

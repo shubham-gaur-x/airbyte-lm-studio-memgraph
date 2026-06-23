@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+httpx
+pydantic>=2.0
+structlog
+openai
+gqlalchemy
+apscheduler
+python-dotenv
+neo4j
+asyncpg
+psycopg2-binary
+tqdm
