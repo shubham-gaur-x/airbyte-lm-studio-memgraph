@@ -24,9 +24,7 @@ services:
     volumes:
       - memgraph_data:/var/lib/memgraph
     environment:
-      MEMGRAPH_USER: ${MEMGRAPH_USER:-""}
-      MEMGRAPH_PASSWORD: ${MEMGRAPH_PASSWORD:-""}
-    command: ["--schema-info-enabled=True", "--log-level=WARNING"]
+      MEMGRAPH_ARGS: "--log-level=WARNING"
     healthcheck:
       test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole --no-history 2>/dev/null || exit 1"]
       interval: 15s
@@ -48,7 +46,9 @@ services:
         condition: service_healthy
 
   transform_service:
-    build: ./transform_service
+    build:
+      context: .
+      dockerfile: transform_service/Dockerfile
     ports:
       - "8000:8000"
     env_file: .env
@@ -58,7 +58,8 @@ services:
       memgraph:
         condition: service_healthy
     volumes:
-      - ./transform_service:/app
+      - ./transform_service:/app/transform_service
+      - ./scripts:/app/scripts
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
