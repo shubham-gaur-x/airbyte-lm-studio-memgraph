@@ -81,7 +81,7 @@ async def create_staging_tables() -> None:
                 END IF;
             END $$;
         """)
-        # Add processed flag to Airbyte's Jira staging table (hash-suffixed name)
+        # Add processed flag to Airbyte's Jira table (hash-suffixed or plain raw_jira_issues)
         airbyte_jira = await conn.fetchval("""
             SELECT table_name FROM information_schema.tables
             WHERE table_schema = 'public'
@@ -91,6 +91,15 @@ async def create_staging_tables() -> None:
         if airbyte_jira:
             await conn.execute(
                 f'ALTER TABLE "{airbyte_jira}" ADD COLUMN IF NOT EXISTS processed BOOLEAN DEFAULT FALSE'
+            )
+        # Also add to the plain raw_jira_issues if Airbyte uses that name now
+        jira_plain_exists = await conn.fetchval("""
+            SELECT EXISTS (SELECT 1 FROM information_schema.tables
+              WHERE table_name = 'raw_jira_issues' AND table_schema = 'public')
+        """)
+        if jira_plain_exists:
+            await conn.execute(
+                "ALTER TABLE raw_jira_issues ADD COLUMN IF NOT EXISTS processed BOOLEAN DEFAULT FALSE"
             )
 
     log.info("db.staging_tables_ready")
@@ -206,16 +215,28 @@ async def get_unprocessed_events(limit: int = 50) -> List[RawCalendarEvent]:
         ]
 
 
+async def _jira_airbyte_table(conn) -> Optional[str]:
+    """Return the Airbyte Jira table name: hash-suffixed preferred, then plain raw_jira_issues."""
+    hashed = await conn.fetchval("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name LIKE 'publicraw_jira_issues%'
+        ORDER BY table_name LIMIT 1
+    """)
+    if hashed:
+        return hashed
+    plain = await conn.fetchval("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'raw_jira_issues'
+        LIMIT 1
+    """)
+    return plain
+
+
 async def get_unprocessed_jira_issues(limit: int = 100) -> List[RawJiraIssue]:
-    """Read from Airbyte's Jira staging table, de-duplicated by Jira issue id."""
+    """Read from Airbyte's Jira table (hash-suffixed or plain raw_jira_issues)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        airbyte_table = await conn.fetchval("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_schema = 'public'
-              AND table_name LIKE 'publicraw_jira_issues%'
-            ORDER BY table_name LIMIT 1
-        """)
+        airbyte_table = await _jira_airbyte_table(conn)
         if not airbyte_table:
             return []
 
@@ -271,13 +292,8 @@ async def mark_processed(table: str, record_id: str) -> None:
                 record_id,
             )
         elif table == "raw_jira_issues":
-            # Mark processed by _airbyte_raw_id in Airbyte's hash-suffixed staging table
-            airbyte_table = await conn.fetchval("""
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name LIKE 'publicraw_jira_issues%'
-                ORDER BY table_name LIMIT 1
-            """)
+            # Mark processed by _airbyte_raw_id in Airbyte's Jira table
+            airbyte_table = await _jira_airbyte_table(conn)
             if airbyte_table:
                 await conn.execute(
                     f'UPDATE "{airbyte_table}" SET processed = TRUE WHERE _airbyte_raw_id = $1',

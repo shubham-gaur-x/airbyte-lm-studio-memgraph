@@ -113,6 +113,14 @@ async def extract_meeting(
         if not data.get("date"):
             fallback_date = ctx.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
             data["date"] = fallback_date
+        if not data.get("summary"):
+            data["summary"] = data.get("title", "No summary available")
+        # Sanitize action_items — owner and task must be strings
+        for item in data.get("action_items") or []:
+            if not item.get("owner"):
+                item["owner"] = "Unknown"
+            if not item.get("task"):
+                item["task"] = "Follow-up required"
         meeting = ExtractedMeeting.model_validate(data)
     except Exception as exc:
         log.error(

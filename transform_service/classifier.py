@@ -7,6 +7,10 @@ _MEETING_KEYWORDS = {
     "meeting", "call", "standup", "sync", "review", "demo", "interview",
     "discussion", "conference", "webinar", "workshop", "session", "agenda",
     "minutes", "recap", "follow-up", "followup",
+    # additional work meeting terms
+    "touchpoint", "touchpoints", "update", "updates", "pilot", "kickoff",
+    "onboarding", "training", "debrief", "retrospective", "retro", "planning",
+    "sprint", "checkin", "handoff", "walkthrough", "briefing", "alignment",
 }
 
 _ACTION_PATTERNS = [

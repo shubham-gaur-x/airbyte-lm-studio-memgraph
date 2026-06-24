@@ -13,7 +13,7 @@ from transform_service.models import RawCalendarEvent, RawEmail
 
 log = structlog.get_logger()
 
-_SCORE_THRESHOLD = 0.5
+_SCORE_THRESHOLD = 0.40
 
 
 async def process_email(email: RawEmail) -> bool:
