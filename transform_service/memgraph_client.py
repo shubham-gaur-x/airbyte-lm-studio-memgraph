@@ -70,6 +70,7 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
             await tx.run(
                 """
                 MERGE (m:Meeting {id: $id})
+                ON CREATE SET m.created_at = $now
                 SET m.title = $title,
                     m.kind = $kind,
                     m.platform = $platform,
@@ -81,7 +82,6 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                     m.confidence = $confidence,
                     m.source_id = $source_id,
                     m.updated_at = $now
-                ON CREATE SET m.created_at = $now
                 """,
                 id=meeting_id,
                 title=meeting.title,
@@ -99,6 +99,8 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
 
             # Person + Organization + ATTENDED + WORKS_AT
             for attendee in meeting.attendees:
+                if not attendee.email:
+                    continue
                 person_id = uuid5_id("person", attendee.email)
                 domain = attendee.email.split("@")[-1] if "@" in attendee.email else "unknown"
                 org_id = uuid5_id("org", domain)
@@ -106,12 +108,12 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                 await tx.run(
                     """
                     MERGE (p:Person {email: $email})
-                    SET p.name = $name, p.id = $person_id, p.updated_at = $now
                     ON CREATE SET p.created_at = $now
+                    SET p.name = $name, p.id = $person_id, p.updated_at = $now
 
                     MERGE (o:Organization {domain: $domain})
-                    SET o.id = $org_id, o.updated_at = $now
                     ON CREATE SET o.created_at = $now
+                    SET o.id = $org_id, o.updated_at = $now
 
                     WITH p, o
                     MERGE (p)-[:WORKS_AT]->(o)
@@ -136,8 +138,8 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                 await tx.run(
                     """
                     MERGE (t:Topic {name: $name})
-                    SET t.id = $topic_id, t.updated_at = $now
                     ON CREATE SET t.created_at = $now
+                    SET t.id = $topic_id, t.updated_at = $now
 
                     WITH t
                     MATCH (m:Meeting {id: $meeting_id})
@@ -155,8 +157,8 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                 await tx.run(
                     """
                     MERGE (d:Decision {id: $id})
-                    SET d.text = $text, d.updated_at = $now
                     ON CREATE SET d.created_at = $now
+                    SET d.text = $text, d.updated_at = $now
 
                     WITH d
                     MATCH (m:Meeting {id: $meeting_id})
@@ -174,13 +176,13 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                 await tx.run(
                     """
                     MERGE (a:ActionItem {id: $id})
+                    ON CREATE SET a.created_at = $now
                     SET a.task = $task,
                         a.owner = $owner,
                         a.due = $due,
                         a.done = $done,
                         a.priority = $priority,
                         a.updated_at = $now
-                    ON CREATE SET a.created_at = $now
 
                     WITH a
                     MATCH (m:Meeting {id: $meeting_id})
@@ -247,43 +249,45 @@ async def update_action_jira_status(jira_key: str, status: str) -> None:
 
 
 async def get_timeline(window: Literal["day", "week", "month"]) -> Dict[str, Any]:
+    from datetime import timedelta
     hours = {"day": 24, "week": 168, "month": 720}[window]
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     driver = get_driver()
     async with driver.session() as session:
         meetings_result = await session.run(
             """
             MATCH (m:Meeting)
-            WHERE m.created_at >= datetime() - duration({hours: $hours})
+            WHERE m.created_at >= $since
             RETURN m.id AS id, m.title AS title, m.date AS date,
                    m.kind AS kind, m.platform AS platform,
                    m.created_at AS created_at
             ORDER BY m.created_at DESC
             """,
-            hours=hours,
+            since=since,
         )
         meetings = [dict(r) async for r in meetings_result]
 
         decisions_result = await session.run(
             """
             MATCH (d:Decision)
-            WHERE d.created_at >= datetime() - duration({hours: $hours})
+            WHERE d.created_at >= $since
             RETURN d.id AS id, d.text AS text, d.created_at AS created_at
             ORDER BY d.created_at DESC
             """,
-            hours=hours,
+            since=since,
         )
         decisions = [dict(r) async for r in decisions_result]
 
         actions_result = await session.run(
             """
             MATCH (a:ActionItem)
-            WHERE a.created_at >= datetime() - duration({hours: $hours})
+            WHERE a.created_at >= $since
             RETURN a.id AS id, a.task AS task, a.owner AS owner,
                    a.due AS due, a.done AS done, a.priority AS priority,
                    a.jira_key AS jira_key, a.created_at AS created_at
             ORDER BY a.created_at DESC
             """,
-            hours=hours,
+            since=since,
         )
         actions = [dict(r) async for r in actions_result]
 

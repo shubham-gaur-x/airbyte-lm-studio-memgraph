@@ -45,6 +45,29 @@ services:
       memgraph:
         condition: service_healthy
 
+  ngrok:
+    image: ngrok/ngrok:latest
+    command: start --all --config /etc/ngrok.yml
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    volumes:
+      - ./ngrok.yml:/etc/ngrok.yml:ro
+    ports:
+      - "4040:4040"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  bore:
+    build:
+      context: .
+      dockerfile: dockerfiles/bore.Dockerfile
+    command: local 5432 --to bore.pub --local-host postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
   transform_service:
     build:
       context: .

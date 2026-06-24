@@ -1,0 +1,9 @@
+version: "3"
+tunnels:
+  webhook:
+    proto: http
+    addr: transform_service:8000
+    domain: chemist-retiree-squash.ngrok-free.dev
+  postgres:
+    proto: tcp
+    addr: postgres:5432

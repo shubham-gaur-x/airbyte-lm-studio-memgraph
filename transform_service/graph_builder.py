@@ -13,7 +13,7 @@ from transform_service.models import RawCalendarEvent, RawEmail
 
 log = structlog.get_logger()
 
-_SCORE_THRESHOLD = 0.6
+_SCORE_THRESHOLD = 0.5
 
 
 async def process_email(email: RawEmail) -> bool:
@@ -79,15 +79,20 @@ async def process_calendar_event(event: RawCalendarEvent) -> bool:
 
         if score < _SCORE_THRESHOLD:
             bound.info("graph_builder.skipped", score=round(score, 3))
-            await db.mark_processed("raw_calendar_events", event.id)
+            await db.mark_processed(event.source_table, event.id)
             return False
 
         bound = bound.bind(step="extract")
-        meeting = await extract_meeting(text, "calendar_event")
+        # Pass the event date so extractor can fill it when LLM returns null
+        event_date = event.start_time[:10] if event.start_time and len(event.start_time) >= 10 else None
+        meeting = await extract_meeting(
+            text, "calendar_event",
+            context={"date": event_date, "platform": "google_calendar"},
+        )
 
         if not meeting:
             bound.warning("graph_builder.extract_failed")
-            await db.mark_processed("raw_calendar_events", event.id)
+            await db.mark_processed(event.source_table, event.id)
             return False
 
         bound = bound.bind(step="graph_write", meeting_title=meeting.title)
@@ -96,7 +101,7 @@ async def process_calendar_event(event: RawCalendarEvent) -> bool:
         bound = bound.bind(step="jira_push")
         await push_action_items(meeting.action_items, meeting, node_id)
 
-        await db.mark_processed("raw_calendar_events", event.id)
+        await db.mark_processed(event.source_table, event.id)
         bound.info("graph_builder.event_processed", score=round(score, 3), node_id=node_id)
         return True
 

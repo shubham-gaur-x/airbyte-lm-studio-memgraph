@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 import openai
 import structlog
@@ -61,7 +62,11 @@ def _get_client() -> openai.AsyncOpenAI:
 
 
 @with_retry(max_attempts=3, base_delay=2.0)
-async def extract_meeting(text: str, source_type: str) -> Optional[ExtractedMeeting]:
+async def extract_meeting(
+    text: str,
+    source_type: str,
+    context: Optional[Dict[str, Any]] = None,
+) -> Optional[ExtractedMeeting]:
     client = _get_client()
     model = os.environ["LM_STUDIO_MODEL"]
     start = time.monotonic()
@@ -76,7 +81,7 @@ async def extract_meeting(text: str, source_type: str) -> Optional[ExtractedMeet
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.0,
-            response_format={"type": "json_object"},
+            response_format={"type": "text"},
             max_tokens=2000,
         )
     except openai.APIConnectionError as exc:
@@ -91,8 +96,23 @@ async def extract_meeting(text: str, source_type: str) -> Optional[ExtractedMeet
     duration_ms = int((time.monotonic() - start) * 1000)
     raw = response.choices[0].message.content or ""
 
+    # Strip markdown fences if the model wraps the JSON
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[-1]
+        if stripped.endswith("```"):
+            stripped = stripped[: stripped.rfind("```")]
+    raw = stripped.strip()
+
     try:
         data = json.loads(raw)
+        ctx = context or {}
+        # Fill required fields when LLM returns null
+        if not data.get("platform"):
+            data["platform"] = ctx.get("platform", "unknown")
+        if not data.get("date"):
+            fallback_date = ctx.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            data["date"] = fallback_date
         meeting = ExtractedMeeting.model_validate(data)
     except Exception as exc:
         log.error(

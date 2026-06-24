@@ -1,4 +1,4 @@
-.PHONY: up down logs shell psql cypher test reset-db setup-memgraph smoke-test backfill
+.PHONY: up down logs shell psql cypher test reset-db setup-memgraph smoke-test backfill tunnels setup-airbyte trigger
 
 up:
 	docker compose up -d
@@ -36,3 +36,18 @@ backfill:
 
 health:
 	curl -s http://localhost:8000/health | python3 -m json.tool
+
+tunnels:
+	@echo "=== ngrok webhook tunnel ==="
+	@curl -sf http://localhost:4040/api/tunnels | python3 -c "import sys,json; t=json.load(sys.stdin)['tunnels']; [print('  webhook:', x['public_url']) for x in t]"
+	@echo "=== bore postgres tunnel ==="
+	@docker compose logs bore --tail=5 2>&1 | grep "listening at" | awk '{print "  postgres:", $$NF}'
+
+setup-airbyte:
+	docker compose exec transform_service python scripts/setup_airbyte.py
+
+trigger:
+	@echo "Triggering pipeline via webhook..."
+	curl -s -X POST http://localhost:8000/webhook/airbyte \
+	  -H 'Content-Type: application/json' \
+	  -d '{"connection_id":"manual","status":"succeeded"}' | python3 -m json.tool

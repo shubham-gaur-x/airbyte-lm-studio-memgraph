@@ -10,7 +10,7 @@ class Attendee(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str
-    email: str
+    email: Optional[str] = None
     role: str = "attendee"
 
 
@@ -72,6 +72,7 @@ class RawCalendarEvent(BaseModel):
     end_time: str
     attendees_json: Optional[str] = None
     processed: bool = False
+    source_table: str = "raw_calendar_events"
 
 
 class RawJiraIssue(BaseModel):
