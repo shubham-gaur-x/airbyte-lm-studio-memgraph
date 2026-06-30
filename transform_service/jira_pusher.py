@@ -7,27 +7,14 @@ import httpx
 import structlog
 
 from transform_service import memgraph_client
+from transform_service.jira_client import jira_base_url as _jira_base_url
+from transform_service.jira_client import jira_headers as _jira_headers
 from transform_service.models import ActionItem, ExtractedMeeting
 from transform_service.utils import uuid5_id, with_retry
 
 log = structlog.get_logger()
 
-
-def _jira_headers() -> Dict[str, str]:
-    import base64
-
-    email = os.environ["JIRA_EMAIL"]
-    token = os.environ["JIRA_API_TOKEN"]
-    creds = base64.b64encode(f"{email}:{token}".encode()).decode()
-    return {
-        "Authorization": f"Basic {creds}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-
-
-def _jira_base_url() -> str:
-    return f"https://{os.environ['JIRA_DOMAIN']}/rest/api/3"
+MEETING_ACTION_ITEM_LABEL = "meeting-action-item"
 
 
 @with_retry(max_attempts=3, base_delay=2.0)
@@ -50,30 +37,33 @@ async def _create_jira_issue(
     description: str,
     priority: str,
     sprint_id: Optional[int],
+    is_engineering_task: bool = False,
 ) -> str:
     project_key = os.environ["JIRA_PROJECT_KEY"]
     issue_type = os.environ.get("JIRA_ISSUE_TYPE", "Task")
 
     jira_priority = {"high": "High", "medium": "Medium", "low": "Low"}.get(priority, "Medium")
 
-    payload: Dict[str, Any] = {
-        "fields": {
-            "project": {"key": project_key},
-            "summary": summary,
-            "description": {
-                "type": "doc",
-                "version": 1,
-                "content": [
-                    {
-                        "type": "paragraph",
-                        "content": [{"type": "text", "text": description}],
-                    }
-                ],
-            },
-            "issuetype": {"name": issue_type},
-            "priority": {"name": jira_priority},
-        }
+    fields: Dict[str, Any] = {
+        "project": {"key": project_key},
+        "summary": summary,
+        "description": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": description}],
+                }
+            ],
+        },
+        "issuetype": {"name": issue_type},
+        "priority": {"name": jira_priority},
     }
+    if not is_engineering_task:
+        fields["labels"] = [MEETING_ACTION_ITEM_LABEL]
+
+    payload: Dict[str, Any] = {"fields": fields}
 
     resp = await client.post(
         f"{_jira_base_url()}/issue",
@@ -134,6 +124,7 @@ async def push_action_items(
                     description=description,
                     priority=action.priority,
                     sprint_id=sprint_id,
+                    is_engineering_task=action.is_engineering_task,
                 )
                 await memgraph_client.update_action_jira_key(action_id, jira_key)
                 created_keys.append(jira_key)

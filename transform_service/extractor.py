@@ -38,7 +38,8 @@ You MUST output ONLY valid JSON matching exactly this schema — no markdown, no
       "task": "description of task",
       "due": "YYYY-MM-DD or null",
       "done": false,
-      "priority": "high|medium|low"
+      "priority": "high|medium|low",
+      "is_engineering_task": true|false
     }
   ],
   "key_quotes": ["notable quotes, max 3"],
@@ -47,6 +48,8 @@ You MUST output ONLY valid JSON matching exactly this schema — no markdown, no
   "follow_up_needed": true|false,
   "confidence": 0.0 to 1.0
 }
+
+is_engineering_task is true only if completing this requires writing or changing code — not for scheduling, communication, or non-technical follow-ups.
 
 If information is not present, use null or empty arrays. Never invent information not in the source text."""
 
@@ -121,6 +124,8 @@ async def extract_meeting(
                 item["owner"] = "Unknown"
             if not item.get("task"):
                 item["task"] = "Follow-up required"
+            if "is_engineering_task" not in item:
+                item["is_engineering_task"] = False
         meeting = ExtractedMeeting.model_validate(data)
     except Exception as exc:
         log.error(

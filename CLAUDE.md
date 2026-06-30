@@ -179,6 +179,26 @@ This is the bidirectional flow — not just writing TO Jira, but also reading FR
 
 ---
 
+## Autonomous Dev Agent (NEW in v4)
+
+`dev_agent/` — a fully autonomous Jira ticket implementer that runs as a separate Docker service (`dev_agent`, port 8002).
+
+**What it does:** Polls Jira every `DEV_AGENT_POLL_MINUTES` minutes and:
+1. **Triage (BACKLOG → TO DO):** Promotes any ticket in BACKLOG that has a non-empty description and no `meeting-action-item` label. No human selects which tickets get worked — this gate is fully autonomous.
+2. **Implement (TO DO → IN PROGRESS → IN REVIEW):** For each eligible TO DO ticket, transitions it to IN PROGRESS, creates a git worktree on branch `agent/<KEY>`, runs headless Claude Code against the ticket description, independently verifies a PR was opened, then transitions to IN REVIEW and posts the PR link as a Jira comment.
+
+**Runs entirely on LM Studio — no Anthropic API key, no exception to the no-cloud-LLM rule.** Claude Code is pointed at LM Studio's native Anthropic-compatible endpoint (`LM_STUDIO_ANTHROPIC_URL`). `ANTHROPIC_API_KEY` is explicitly set to empty in the subprocess env so a key in the parent environment can never accidentally route traffic to api.anthropic.com.
+
+**The one remaining human checkpoint is merging the PR.** Auto-merge is explicitly NOT implemented in these phases. Do not add it without an explicit go-ahead.
+
+**Failure path:** If Claude Code fails, times out, or produces no PR, the ticket returns to TO DO (not stuck in IN PROGRESS), a Jira comment says it needs human follow-up, and `dev_agent_runs` records `status=failed`. Tickets are not retried unless `DEV_AGENT_MAX_ATTEMPTS` is raised above 1.
+
+**Lifecycle:** `BACKLOG` (no skip label + non-empty description) → `TO DO` (triage, autonomous) → `IN PROGRESS` (implementation starts, autonomous) → `IN REVIEW` (PR verified, autonomous) — or back to `TO DO` on failure.
+
+See `docs/DEV_AGENT.md` for operational details and `docs/superpowers/specs/2026-06-29-autonomous-dev-agent-design.md` for the full design rationale.
+
+---
+
 ## Timeline View (NEW in v4)
 
 `GET /graph/timeline?window=day|week|month`
@@ -227,7 +247,11 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
 - DO NOT use synchronous `requests` library — always `httpx.AsyncClient`
 - DO NOT hardcode any secret or API key in source code
 - DO NOT put Cypher outside `memgraph_client.py`
-- DO NOT put SQL outside `db.py`
+- DO NOT put SQL outside `db.py` (or `dev_agent/db.py` for the dev agent's own table)
+- DO NOT call `api.anthropic.com` from `dev_agent` — LM Studio only (no Anthropic API key)
+- DO NOT auto-merge PRs opened by the dev agent — human review is the one remaining checkpoint; do not jump ahead of it
+- DO NOT put Jira REST calls outside `jira_client.py` (applies to `dev_agent` and `transform_service` alike)
+- DO NOT let `dev_agent` default `is_engineering_task` to `True` when missing — fail safe toward NOT auto-implementing
 
 ---
 
@@ -266,6 +290,25 @@ AIRBYTE_WEBHOOK_SECRET=
 # Service
 PORT=8000
 LOG_LEVEL=INFO
+
+# Dev Agent (autonomous Jira ticket implementer — see docs/DEV_AGENT.md)
+GITHUB_TOKEN=
+GITHUB_OWNER=shubham-gaur-x
+GITHUB_REPO=airbyte-lm-studio-memgraph
+LM_STUDIO_ANTHROPIC_URL=http://host.docker.internal:1234
+DEV_AGENT_LM_MODEL=gemma3-12b
+DEV_AGENT_BACKLOG_STATUS=Backlog
+DEV_AGENT_TODO_STATUS=To Do
+DEV_AGENT_IN_PROGRESS_STATUS=In Progress
+DEV_AGENT_REVIEW_STATUS=In Review
+DEV_AGENT_SKIP_LABELS=meeting-action-item
+DEV_AGENT_POLL_MINUTES=10
+DEV_AGENT_BATCH_SIZE=5
+DEV_AGENT_MAX_TURNS=40
+DEV_AGENT_TIMEOUT_SECONDS=1800
+DEV_AGENT_MAX_ATTEMPTS=1
+DEV_AGENT_GIT_NAME=Meeting Memory Dev Agent
+DEV_AGENT_GIT_EMAIL=dev-agent@local
 ```
 
 ---

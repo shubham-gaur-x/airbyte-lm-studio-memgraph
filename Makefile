@@ -1,4 +1,4 @@
-.PHONY: up down logs shell psql cypher test reset-db setup-memgraph smoke-test backfill tunnels setup-airbyte trigger
+.PHONY: up down logs shell psql cypher test reset-db setup-memgraph smoke-test backfill tunnels setup-airbyte trigger dev-agent-logs dev-agent-trigger dev-agent-triage dev-agent-runs mcp-setup
 
 up:
 	docker compose up -d
@@ -19,7 +19,7 @@ cypher:
 	docker compose exec memgraph mgconsole
 
 test:
-	docker compose exec transform_service python -m pytest -v
+	docker compose exec -w /app transform_service python -m pytest tests/ -v
 
 reset-db:
 	docker compose down -v
@@ -51,3 +51,22 @@ trigger:
 	curl -s -X POST http://localhost:8000/webhook/airbyte \
 	  -H 'Content-Type: application/json' \
 	  -d '{"connection_id":"manual","status":"succeeded"}' | python3 -m json.tool
+
+dev-agent-logs:
+	docker compose logs -f dev_agent
+
+dev-agent-trigger:
+	curl -s -X POST http://localhost:8002/trigger/$(TICKET) | python3 -m json.tool
+
+dev-agent-triage:
+	curl -s -X POST http://localhost:8002/triage | python3 -m json.tool
+
+dev-agent-runs:
+	curl -s http://localhost:8002/runs | python3 -m json.tool
+
+mcp-setup:
+	@echo "Installing Jira MCP server..."
+	npm install -g @aashari/mcp-server-atlassian-jira
+	@echo "Writing Claude Desktop MCP config..."
+	@python3 scripts/update_claude_mcp_config.py
+	@echo "Done. Restart Claude Desktop to pick up the new MCP servers."

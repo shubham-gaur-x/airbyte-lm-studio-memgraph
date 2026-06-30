@@ -182,6 +182,7 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                         a.due = $due,
                         a.done = $done,
                         a.priority = $priority,
+                        a.is_engineering_task = $is_engineering_task,
                         a.updated_at = $now
 
                     WITH a
@@ -200,6 +201,7 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                     due=str(action.due) if action.due else None,
                     done=action.done,
                     priority=action.priority,
+                    is_engineering_task=action.is_engineering_task,
                     meeting_id=meeting_id,
                     owner_email=action.owner if "@" in action.owner else None,
                     now=now,

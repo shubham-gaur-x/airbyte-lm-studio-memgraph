@@ -23,6 +23,7 @@ class ActionItem(BaseModel):
     done: bool = False
     priority: Literal["high", "medium", "low"] = "medium"
     jira_key: Optional[str] = None
+    is_engineering_task: bool = False
 
 
 class ExtractedMeeting(BaseModel):

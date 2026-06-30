@@ -83,9 +83,29 @@ services:
     volumes:
       - ./transform_service:/app/transform_service
       - ./scripts:/app/scripts
+      - ./tests:/app/tests
+      - ./dev_agent:/app/dev_agent
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  dev_agent:
+    build:
+      context: .
+      dockerfile: dev_agent/Dockerfile
+    ports:
+      - "8002:8000"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./transform_service:/app/transform_service:ro
+      - ./dev_agent:/app/dev_agent
+      - dev_agent_repo:/work/repo
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
 volumes:
   postgres_data:
   memgraph_data:
+  dev_agent_repo:
