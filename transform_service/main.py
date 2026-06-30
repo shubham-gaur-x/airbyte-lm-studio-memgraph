@@ -68,6 +68,7 @@ async def lifespan(app: FastAPI):
     await db.create_staging_tables()
     await memgraph_client.create_indexes()
 
+    scheduler.add_job(db.create_staging_tables, "interval", minutes=5, id="ensure_columns")
     scheduler.add_job(process_new_emails, "interval", minutes=5, id="poll_emails")
     scheduler.add_job(process_new_events, "interval", minutes=5, id="poll_events")
     scheduler.add_job(process_jira_issues, "interval", minutes=5, id="poll_jira")

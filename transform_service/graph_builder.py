@@ -14,6 +14,7 @@ from transform_service.models import RawCalendarEvent, RawEmail
 log = structlog.get_logger()
 
 _SCORE_THRESHOLD = 0.40
+_GRAPH_SEM = asyncio.Semaphore(3)
 
 
 async def process_email(email: RawEmail) -> bool:
@@ -24,7 +25,7 @@ async def process_email(email: RawEmail) -> bool:
 
         if score < _SCORE_THRESHOLD:
             bound.info("graph_builder.skipped", score=round(score, 3))
-            await db.mark_processed("raw_emails", email.id)
+            await db.mark_processed(email.source_table, email.id)
             return False
 
         bound = bound.bind(step="extract")
@@ -32,16 +33,17 @@ async def process_email(email: RawEmail) -> bool:
 
         if not meeting:
             bound.warning("graph_builder.extract_failed")
-            await db.mark_processed("raw_emails", email.id)
+            await db.mark_processed(email.source_table, email.id)
             return False
 
         bound = bound.bind(step="graph_write", meeting_title=meeting.title)
-        node_id = await memgraph_client.upsert_meeting_graph(meeting, email.source_id)
+        async with _GRAPH_SEM:
+            node_id = await memgraph_client.upsert_meeting_graph(meeting, email.source_id)
 
         bound = bound.bind(step="jira_push")
         await push_action_items(meeting.action_items, meeting, node_id)
 
-        await db.mark_processed("raw_emails", email.id)
+        await db.mark_processed(email.source_table, email.id)
         bound.info("graph_builder.email_processed", score=round(score, 3), node_id=node_id)
         return True
 
@@ -96,7 +98,8 @@ async def process_calendar_event(event: RawCalendarEvent) -> bool:
             return False
 
         bound = bound.bind(step="graph_write", meeting_title=meeting.title)
-        node_id = await memgraph_client.upsert_meeting_graph(meeting, event.source_id)
+        async with _GRAPH_SEM:
+            node_id = await memgraph_client.upsert_meeting_graph(meeting, event.source_id)
 
         bound = bound.bind(step="jira_push")
         await push_action_items(meeting.action_items, meeting, node_id)

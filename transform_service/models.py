@@ -59,6 +59,7 @@ class RawEmail(BaseModel):
     body: str
     received_at: str
     processed: bool = False
+    source_table: str = "raw_emails"
 
 
 class RawCalendarEvent(BaseModel):

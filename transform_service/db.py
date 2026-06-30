@@ -71,6 +71,14 @@ async def create_staging_tables() -> None:
             )
         """)
 
+        # Gmail processed-ID tracker (survives Full Refresh re-syncs)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS processed_gmail_ids (
+                gmail_id TEXT PRIMARY KEY,
+                processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
         # Add processed flag to Airbyte's GCal table if it exists
         await conn.execute("""
             DO $$ BEGIN
@@ -111,6 +119,52 @@ async def sync_airbyte_jira_to_staging() -> int:
 
 
 async def get_unprocessed_emails(limit: int = 50) -> List[RawEmail]:
+    """Read from Airbyte's messages_details table (preferred) with fallback to raw_emails."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        gmail_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'messages_details' AND table_schema = 'public'
+            )
+        """)
+
+        if gmail_exists:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (id)
+                    id AS source_id,
+                    (SELECT h->>'value' FROM jsonb_array_elements(payload->'headers') h
+                     WHERE h->>'name' = 'Subject' LIMIT 1) AS subject,
+                    (SELECT h->>'value' FROM jsonb_array_elements(payload->'headers') h
+                     WHERE h->>'name' = 'From' LIMIT 1) AS from_email,
+                    (SELECT h->>'value' FROM jsonb_array_elements(payload->'headers') h
+                     WHERE h->>'name' = 'To' LIMIT 1) AS to_email,
+                    COALESCE(snippet, '') AS snippet,
+                    to_timestamp(("internalDate"::bigint) / 1000) AS received_at
+                FROM messages_details
+                WHERE payload IS NOT NULL
+                  AND id NOT IN (SELECT gmail_id FROM processed_gmail_ids)
+                ORDER BY id, _airbyte_extracted_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+            return [
+                RawEmail(
+                    id=r["source_id"],
+                    source_id=r["source_id"],
+                    subject=r["subject"] or "(no subject)",
+                    from_email=r["from_email"] or "",
+                    to_emails=[r["to_email"]] if r["to_email"] else [],
+                    body=r["snippet"],
+                    received_at=str(r["received_at"]) if r["received_at"] else "",
+                    processed=False,
+                    source_table="messages_details",
+                )
+                for r in rows
+            ]
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -280,19 +334,23 @@ async def get_unprocessed_jira_issues(limit: int = 100) -> List[RawJiraIssue]:
 
 
 async def mark_processed(table: str, record_id: str) -> None:
-    allowed = {"raw_emails", "raw_calendar_events", "raw_jira_issues", "raw_gcal_events"}
+    allowed = {"raw_emails", "raw_calendar_events", "raw_jira_issues", "raw_gcal_events", "messages_details"}
     if table not in allowed:
         raise ValueError(f"Unknown table: {table}")
     pool = await get_pool()
     async with pool.acquire() as conn:
         if table == "raw_gcal_events":
-            # uses varchar _airbyte_raw_id
             await conn.execute(
                 "UPDATE raw_gcal_events SET processed = TRUE WHERE _airbyte_raw_id = $1",
                 record_id,
             )
+        elif table == "messages_details":
+            # Track by Gmail message ID in our own table (survives Airbyte re-syncs)
+            await conn.execute(
+                "INSERT INTO processed_gmail_ids (gmail_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                record_id,
+            )
         elif table == "raw_jira_issues":
-            # Mark processed by _airbyte_raw_id in Airbyte's Jira table
             airbyte_table = await _jira_airbyte_table(conn)
             if airbyte_table:
                 await conn.execute(
