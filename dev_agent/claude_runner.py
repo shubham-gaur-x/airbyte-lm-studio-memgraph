@@ -90,15 +90,27 @@ async def run_claude_code(
     stderr_str = stderr_bytes.decode(errors="replace")
 
     if proc.returncode != 0:
+        # claude's own JSON error result (the actually useful message, e.g.
+        # LM Studio API errors) is written to stdout even on nonzero exit —
+        # stderr is frequently empty. Prefer the parsed "result" field, fall
+        # back to raw stdout, then stderr, so a real message always surfaces.
+        error_detail = stderr_str.strip()
+        if not error_detail and stdout_str.strip():
+            try:
+                parsed = json.loads(stdout_str)
+                error_detail = parsed.get("result") or stdout_str
+            except (json.JSONDecodeError, ValueError):
+                error_detail = stdout_str
+
         log.error(
             "claude_runner.nonzero_exit",
             returncode=proc.returncode,
-            stderr_snippet=stderr_str[-2000:],
+            error_detail=error_detail[-2000:],
         )
         return ClaudeRunResult(
             success=False,
             returncode=proc.returncode,
-            result_text=stderr_str[-2000:],
+            result_text=error_detail[-2000:],
             duration_ms=duration_ms,
         )
 

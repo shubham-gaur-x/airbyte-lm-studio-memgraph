@@ -139,9 +139,10 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
         if not result.success:
             bound_log.error("orchestrator.claude_failed", error=result.result_text[:200])
             await db.finish_run(key, "failed", error=result.result_text[:2000])
+            reason = result.result_text.strip()[:500] or "no error detail captured"
             await jira_client.add_comment(
                 key,
-                "Dev agent could not complete this ticket automatically (see dev_agent logs). Needs human follow-up.",
+                f"Dev agent could not complete this ticket automatically. Needs human follow-up.\n\nError: {reason}",
             )
             await jira_client.transition_issue(key, DEV_AGENT_TODO_STATUS())
             return
@@ -185,8 +186,16 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
 async def poll_and_process() -> None:
     log.info("orchestrator.poll.start")
 
-    await git_ops.ensure_repo_cloned(REPO_DIR(), GITHUB_OWNER(), GITHUB_REPO(), GITHUB_TOKEN())
+    # Triage is pure Jira API — it doesn't need the repo, so it must not be
+    # blocked by a git failure. It runs first and unconditionally.
     await triage_backlog()
+
+    try:
+        await git_ops.ensure_repo_cloned(REPO_DIR(), GITHUB_OWNER(), GITHUB_REPO(), GITHUB_TOKEN())
+    except Exception as exc:
+        log.error("orchestrator.poll.repo_unavailable", error=str(exc))
+        log.info("orchestrator.poll.done", attempted=0, reason="repo_unavailable")
+        return
 
     tickets = await jira_client.list_eligible_tickets(
         JIRA_PROJECT_KEY(),

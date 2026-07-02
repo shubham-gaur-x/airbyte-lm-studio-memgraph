@@ -75,6 +75,39 @@ async def test_nonzero_exit():
 
 
 @pytest.mark.anyio
+async def test_nonzero_exit_with_empty_stderr_falls_back_to_stdout_json():
+    """claude's own JSON error result goes to stdout even on nonzero exit —
+    stderr is frequently empty. The real message must still surface."""
+    from dev_agent.claude_runner import run_claude_code
+
+    stdout = _json_stdout(result="API Error: 500 context length exceeded", is_error=True)
+    proc = _make_proc(1, stdout, b"")
+
+    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+        result = await run_claude_code("/work/SCRUM-2", "implement ticket", 600, 40)
+
+    assert result.success is False
+    assert result.returncode == 1
+    assert "context length exceeded" in result.result_text
+
+
+@pytest.mark.anyio
+async def test_nonzero_exit_with_unparseable_stdout_and_empty_stderr():
+    """Neither stderr nor valid JSON on stdout — fall back to raw stdout
+    rather than surfacing nothing."""
+    from dev_agent.claude_runner import run_claude_code
+
+    proc = _make_proc(1, b"not valid json output", b"")
+
+    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+        result = await run_claude_code("/work/SCRUM-2", "implement ticket", 600, 40)
+
+    assert result.success is False
+    assert result.returncode == 1
+    assert "not valid json output" in result.result_text
+
+
+@pytest.mark.anyio
 async def test_timeout():
     """asyncio.wait_for raises TimeoutError → timed_out=True, returncode=-1."""
     from dev_agent.claude_runner import run_claude_code
