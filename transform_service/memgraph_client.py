@@ -47,6 +47,13 @@ async def create_indexes() -> None:
         "CREATE INDEX ON :Meeting(created_at)",
         "CREATE INDEX ON :ActionItem(created_at)",
         "CREATE INDEX ON :Decision(created_at)",
+        # Vector indexes for semantic search — 768 dims matches LM Studio's
+        # text-embedding-nomic-embed-text-v1.5. CREATE VECTOR INDEX is naturally
+        # idempotent (no error on re-run), unlike constraints.
+        'CREATE VECTOR INDEX meeting_embedding_idx ON :Meeting(embedding) '
+        'WITH CONFIG {"dimension": 768, "capacity": 2048, "metric": "cos"}',
+        'CREATE VECTOR INDEX fact_embedding_idx ON :Fact(embedding) '
+        'WITH CONFIG {"dimension": 768, "capacity": 2048, "metric": "cos"}',
     ]
     async with driver.session() as session:
         for cypher in constraints:
@@ -70,7 +77,7 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
             await tx.run(
                 """
                 MERGE (m:Meeting {id: $id})
-                ON CREATE SET m.created_at = $now
+                ON CREATE SET m.created_at = $now, m.relevance_weight = 1.0
                 SET m.title = $title,
                     m.kind = $kind,
                     m.platform = $platform,
@@ -357,6 +364,102 @@ async def get_open_actions() -> List[Dict[str, Any]]:
                    a.due AS due, a.priority AS priority,
                    a.jira_key AS jira_key, a.jira_status AS jira_status
             ORDER BY a.priority, a.due
+            """
+        )
+        return [dict(r) async for r in result]
+
+
+async def get_influential_nodes(label: str = "Person", limit: int = 10) -> List[Dict[str, Any]]:
+    """Return top N nodes by pagerank_score for a given label."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            f"""
+            MATCH (n:{label})
+            WHERE n.pagerank_score IS NOT NULL
+            RETURN n.id AS id,
+                   COALESCE(n.name, n.email, n.name) AS name,
+                   n.pagerank_score AS pagerank_score,
+                   n.community_id AS community_id
+            ORDER BY n.pagerank_score DESC
+            LIMIT $limit
+            """,
+            limit=limit,
+        )
+        return [dict(r) async for r in result]
+
+
+async def get_community_members(community_id: int) -> List[Dict[str, Any]]:
+    """Return all nodes in a given community_id."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (n)
+            WHERE n.community_id = $community_id
+            RETURN n.id AS id,
+                   COALESCE(n.name, n.email) AS name,
+                   labels(n) AS labels,
+                   n.pagerank_score AS pagerank_score
+            """,
+            community_id=community_id,
+        )
+        return [dict(r) async for r in result]
+
+
+async def get_bridge_nodes(limit: int = 10) -> List[Dict[str, Any]]:
+    """Return top N nodes by betweenness_centrality."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (n)
+            WHERE n.betweenness_centrality IS NOT NULL
+            RETURN n.id AS id,
+                   COALESCE(n.name, n.email) AS name,
+                   labels(n) AS labels,
+                   n.betweenness_centrality AS betweenness_centrality,
+                   n.community_id AS community_id
+            ORDER BY n.betweenness_centrality DESC
+            LIMIT $limit
+            """,
+            limit=limit,
+        )
+        return [dict(r) async for r in result]
+
+
+async def get_node_insights(node_id: str) -> Dict[str, Any]:
+    """Return algorithm scores for a specific node."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (n {id: $id})
+            RETURN n.id AS id,
+                   COALESCE(n.name, n.email) AS name,
+                   labels(n) AS labels,
+                   n.pagerank_score AS pagerank_score,
+                   n.community_id AS community_id,
+                   n.betweenness_centrality AS betweenness_centrality,
+                   n.degree_centrality AS degree_centrality,
+                   n.wcc_id AS wcc_id
+            """,
+            id=node_id,
+        )
+        records = [dict(r) async for r in result]
+        return records[0] if records else {}
+
+
+async def get_all_communities() -> List[Dict[str, Any]]:
+    """Return all community_ids with their member node IDs."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (n)
+            WHERE n.community_id IS NOT NULL
+            RETURN n.community_id AS community_id, collect(n.id) AS members
+            ORDER BY community_id
             """
         )
         return [dict(r) async for r in result]

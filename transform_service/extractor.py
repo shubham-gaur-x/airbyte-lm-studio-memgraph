@@ -10,7 +10,7 @@ import openai
 import structlog
 
 from transform_service.models import ExtractedMeeting
-from transform_service.utils import with_retry
+from transform_service.utils import strip_json_fences, with_retry
 
 log = structlog.get_logger()
 
@@ -97,15 +97,7 @@ async def extract_meeting(
         raise
 
     duration_ms = int((time.monotonic() - start) * 1000)
-    raw = response.choices[0].message.content or ""
-
-    # Strip markdown fences if the model wraps the JSON
-    stripped = raw.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.split("\n", 1)[-1]
-        if stripped.endswith("```"):
-            stripped = stripped[: stripped.rfind("```")]
-    raw = stripped.strip()
+    raw = strip_json_fences(response.choices[0].message.content or "")
 
     try:
         data = json.loads(raw)

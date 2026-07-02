@@ -19,6 +19,17 @@ def uuid5_id(namespace: str, value: str) -> str:
     return str(uuid.uuid5(ns, value))
 
 
+def strip_json_fences(raw: str) -> str:
+    """Local models often wrap JSON responses in ```json ... ``` fences despite
+    being told to respond with raw JSON only. Strip them before json.loads()."""
+    stripped = (raw or "").strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[-1]
+        if stripped.endswith("```"):
+            stripped = stripped[: stripped.rfind("```")]
+    return stripped.strip()
+
+
 def configure_logging() -> structlog.BoundLogger:
     logging.basicConfig(
         format="%(message)s",

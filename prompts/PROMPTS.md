@@ -1156,3 +1156,735 @@ No code in this phase — documentation only.
   that needs its own explicit go-ahead, not an assumption.
 - Superpowers will trigger TDD automatically — let it. Don't skip tests.
 - If a phase feels too big, use `/plan` from forge-skills to break it down further.
+
+---
+
+# Graph Memory + Advanced Algorithms — Phases 21-25
+
+# Design doc: docs/superpowers/specs/2026-06-30-graph-memory-algorithms-design.md
+# Read it in full before Phase 21. Especially the Module Boundaries section —
+# MAGE CALL procedures in the wrong file is the most likely mistake.
+#
+# Key constraint to verify before coding Phase 21:
+#   docker compose exec memgraph mgconsole --execute "CALL mg.procedures() YIELD *
+#   WHERE name STARTS WITH 'pagerank' RETURN name LIMIT 5;"
+# If that returns results, MAGE is available and you can proceed.
+# If it returns nothing, the image bundled is not memgraph-platform — stop and flag.
+
+## PHASE 21 — MAGE algorithms + schema extension
+
+```
+Read CLAUDE.md and docs/superpowers/specs/2026-06-30-graph-memory-algorithms-design.md
+in full before writing a single line.
+
+Update scripts/setup_memgraph.py — add new constraints/indexes after the
+existing ones (do not remove any existing constraints):
+
+  New constraints:
+    CREATE CONSTRAINT ON (f:Fact) ASSERT f.id IS UNIQUE
+    CREATE CONSTRAINT ON (pref:Preference) ASSERT pref.id IS UNIQUE
+    CREATE CONSTRAINT ON (proc:Procedure) ASSERT proc.id IS UNIQUE
+    CREATE CONSTRAINT ON (ps:ProcedureStep) ASSERT ps.id IS UNIQUE
+    CREATE CONSTRAINT ON (ms:MemorySession) ASSERT ms.id IS UNIQUE
+
+  New indexes:
+    CREATE INDEX ON :Person(community_id)
+    CREATE INDEX ON :Person(pagerank_score)
+    CREATE INDEX ON :Topic(community_id)
+    CREATE INDEX ON :Meeting(relevance_weight)
+    CREATE INDEX ON :Fact(confidence)
+    CREATE INDEX ON :MemorySession(created_at)
+
+Create transform_service/graph_algorithms.py:
+
+  This module is the ONLY place in the entire codebase where MAGE CALL
+  procedures appear. Never add MAGE CALL procedures elsewhere.
+
+  async def run_fast_algorithms() -> dict:
+    """Event-driven path — called after each processed batch.
+    Uses Louvain community_detection (faster) for speed."""
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+      # Run each algorithm and write results back as node properties in the
+      # same Cypher statement. Use separate session.run() calls per algorithm
+      # so one failure doesn't abort the others — catch and log each individually.
+
+      await session.run("""
+          CALL pagerank.get()
+          YIELD node, rank
+          SET node.pagerank_score = rank
+      """)
+
+      await session.run("""
+          CALL community_detection.get()
+          YIELD node, community_id
+          SET node.community_id = community_id
+      """)
+
+      await session.run("""
+          CALL betweenness_centrality.get()
+          YIELD node, betweenness_centrality
+          SET node.betweenness_centrality = betweenness_centrality
+      """)
+
+      await session.run("""
+          CALL degree_centrality.get()
+          YIELD node, degree_centrality
+          SET node.degree_centrality = degree_centrality
+      """)
+
+      await session.run("""
+          CALL weakly_connected_components.get()
+          YIELD node, component_id
+          SET node.wcc_id = component_id
+      """)
+
+    log.info("graph_algorithms.fast_run_complete")
+    return {"algorithms_run": ["pagerank", "community_detection",
+            "betweenness_centrality", "degree_centrality", "wcc"]}
+
+  async def run_full_algorithms() -> dict:
+    """Nightly path — uses leiden_community_detection (more accurate)
+    and recomputes all five algorithms over the full graph."""
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+      # Same as run_fast_algorithms() but replace community_detection with
+      # leiden_community_detection. Catch and log failures individually.
+      # leiden call:
+      #   CALL leiden_community_detection.get()
+      #   YIELD node, community_id
+      #   SET node.community_id = community_id
+      # Run all five. Log a summary dict of how many nodes were updated
+      # (use a COUNT query after each SET).
+      pass  # implement fully — this is not pseudocode
+
+    log.info("graph_algorithms.full_run_complete")
+    return {"algorithms_run": ["pagerank", "leiden_community_detection",
+            "betweenness_centrality", "degree_centrality", "wcc"]}
+
+  async def get_jaccard_similarity(node_id_a: str, node_id_b: str) -> float:
+    """On-demand: Jaccard similarity between two nodes based on shared
+    neighbors. Used by procedural memory's discover_procedures()."""
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+      result = await session.run("""
+          MATCH (a {id: $id_a}), (b {id: $id_b})
+          CALL node_similarity.jaccard(a, b)
+          YIELD similarity
+          RETURN similarity
+      """, id_a=node_id_a, id_b=node_id_b)
+      record = await result.single()
+      return record["similarity"] if record else 0.0
+
+Add to transform_service/memgraph_client.py — new query functions only,
+no MAGE CALL procedures here:
+
+  async def get_influential_nodes(label: str = "Person", limit: int = 10) -> list:
+    """Return top N nodes by pagerank_score for a given label."""
+    ...MATCH (n:{label}) WHERE n.pagerank_score IS NOT NULL
+    RETURN n.id, n.name OR n.email OR n.name AS name,
+    n.pagerank_score, n.community_id ORDER BY n.pagerank_score DESC LIMIT limit...
+
+  async def get_community_members(community_id: int) -> list:
+    """Return all nodes in a given community_id."""
+
+  async def get_bridge_nodes(limit: int = 10) -> list:
+    """Return top N nodes by betweenness_centrality."""
+
+  async def get_node_insights(node_id: str) -> dict:
+    """Return algorithm scores for a specific node."""
+
+Update transform_service/graph_builder.py:
+  After the existing await push_action_items(...) line in BOTH process_email
+  and process_calendar_event, add:
+    from transform_service import graph_algorithms
+    try:
+        await graph_algorithms.run_fast_algorithms()
+    except Exception as exc:
+        log.warning("graph_builder.algorithms_skipped", error=str(exc))
+  This must be inside the try block, after push_action_items, before
+  mark_processed. It must NOT raise — algorithm failure should never
+  prevent a meeting from being marked processed.
+
+Update transform_service/main.py:
+  In the lifespan function, add two new scheduler jobs after the existing ones:
+    scheduler.add_job(
+        graph_algorithms.run_full_algorithms,
+        "cron", hour=2, minute=0,
+        id="nightly_algorithms"
+    )
+  Import graph_algorithms at the top of main.py.
+
+Add four new GET endpoints to main.py (no request body, just path/query params):
+  GET /graph/insights/influential?label=Person&limit=10
+      → calls memgraph_client.get_influential_nodes(label, limit)
+  GET /graph/insights/communities
+      → MATCH (n) WHERE n.community_id IS NOT NULL
+        RETURN n.community_id, collect(n.id) as members grouped by community_id
+  GET /graph/insights/bridges?limit=10
+      → calls memgraph_client.get_bridge_nodes(limit)
+  GET /graph/insights/node/{node_id}
+      → calls memgraph_client.get_node_insights(node_id)
+
+Write tests: mock the Memgraph driver and assert each algorithm function
+runs the correct CALL statement and handles individual algorithm failure
+gracefully (one algorithm failing should not abort the others).
+```
+
+---
+
+## PHASE 22 — Semantic memory
+
+```
+Read CLAUDE.md and the design doc in full.
+
+Create transform_service/semantic_memory.py:
+
+  Import: memgraph_client (for driver), extractor._get_client() for LM Studio
+  (do NOT create a new LLM client — reuse the existing singleton), utils.uuid5_id.
+
+  async def extract_facts(meeting: ExtractedMeeting, meeting_id: str) -> int:
+    """Call LM Studio to extract 3-5 durable facts from the meeting summary.
+    MERGE Fact nodes. Return count of facts created."""
+
+    Prompt (short, temperature=0.0):
+      System: "Extract 3-5 durable facts from this meeting summary.
+      A fact is something persistently true about a person, project, or topic —
+      not a one-time event. Respond ONLY with a JSON array of strings.
+      Example: [\"Alice leads the backend team\", \"The API migration is Q3\"]"
+      User: meeting.summary
+
+    Parse the JSON array. For each fact_text:
+      fact_id = uuid5_id("fact", fact_text.lower().strip())
+      MERGE (f:Fact {id: $fact_id})
+      ON CREATE SET f.text = $text, f.confidence = 0.3, f.source_count = 1,
+                    f.created_at = $now
+      ON MATCH SET f.source_count = f.source_count + 1,
+                   f.confidence = min(1.0, f.confidence + 0.1),
+                   f.updated_at = $now
+      WITH f
+      MATCH (m:Meeting {id: $meeting_id})
+      MERGE (m)-[:HAS_FACT]->(f)
+
+    Return count of facts written.
+
+  async def infer_preferences(meeting: ExtractedMeeting, meeting_id: str) -> int:
+    """Infer preferences for attendees with >= 3 meetings in the graph.
+    Skip attendees with fewer meetings — not enough signal yet."""
+
+    First query: for each attendee email in meeting.attendees, check
+    MATCH (p:Person {email: $email})-[:ATTENDED]->(m:Meeting)
+    RETURN count(m) as meeting_count. Only process those with meeting_count >= 3.
+
+    For each eligible attendee, one LM Studio call:
+      System: "Given this person's meeting history context, infer 1-2 preferences
+      about how they work. Respond ONLY with a JSON array of objects:
+      [{\"category\": \"string\", \"value\": \"string\"}].
+      Categories: communication_style, meeting_frequency, topic_interest,
+      work_pattern, timezone_preference. Be specific, not generic."
+      User: f"Person: {attendee.name}\nRole: {attendee.role}\n
+             Meeting topics: {', '.join(meeting.topics)}\n
+             Meeting kind: {meeting.kind}"
+
+    For each preference object:
+      pref_id = uuid5_id("preference", f"{attendee.email}:{pref['category']}:{pref['value']}")
+      MERGE (pref:Preference {id: $pref_id})
+      ON CREATE SET ...
+      MERGE (p:Person {email: $email})-[:PREFERS]->(pref)
+
+    Return count of preferences written.
+
+  async def strengthen_relationships(meeting: ExtractedMeeting, meeting_id: str) -> None:
+    """Pure Cypher — no LM call. Strengthen KNOWS and INTERESTED_IN edges."""
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+      emails = [a.email for a in meeting.attendees if a.email]
+
+      # KNOWS: for each pair of attendees who both attended this meeting
+      # MERGE the relationship and increment weight by 1.
+      # Use UNWIND on the pair list approach — see below.
+      await session.run("""
+          UNWIND $emails AS email1
+          UNWIND $emails AS email2
+          WITH email1, email2 WHERE email1 < email2
+          MATCH (p1:Person {email: email1}), (p2:Person {email: email2})
+          MERGE (p1)-[k:KNOWS]->(p2)
+          ON CREATE SET k.weight = 1, k.created_at = $now
+          ON MATCH SET k.weight = k.weight + 1, k.updated_at = $now
+      """, emails=emails, now=now)
+
+      # INTERESTED_IN: for each attendee × each topic in this meeting
+      for topic_name in meeting.topics:
+          await session.run("""
+              UNWIND $emails AS email
+              MATCH (p:Person {email: email}), (t:Topic {name: $topic})
+              MERGE (p)-[i:INTERESTED_IN]->(t)
+              ON CREATE SET i.weight = 1, i.created_at = $now
+              ON MATCH SET i.weight = i.weight + 1, i.updated_at = $now
+          """, emails=emails, topic=topic_name, now=now)
+
+  async def consolidate_semantic() -> dict:
+    """Nightly: raise confidence of well-confirmed facts.
+    Facts with source_count in [3,6,9,...] get a confidence boost."""
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+      result = await session.run("""
+          MATCH (f:Fact)
+          WHERE f.source_count % 3 = 0 AND f.confidence < 1.0
+          SET f.confidence = min(1.0, f.confidence + 0.2)
+          RETURN count(f) AS boosted
+      """)
+      record = await result.single()
+      return {"facts_boosted": record["boosted"] if record else 0}
+
+Wire into transform_service/graph_builder.py:
+  After the existing call to graph_algorithms.run_fast_algorithms() (added
+  in Phase 21), add — inside the same try/except wrapper:
+    from transform_service import semantic_memory
+    await semantic_memory.extract_facts(meeting, node_id)
+    await semantic_memory.infer_preferences(meeting, node_id)
+    await semantic_memory.strengthen_relationships(meeting, node_id)
+
+Add to nightly APScheduler job in main.py:
+  scheduler.add_job(semantic_memory.consolidate_semantic, "cron",
+                    hour=2, minute=15, id="nightly_consolidate_semantic")
+
+Write tests: mock LM Studio client and driver. Test extract_facts JSON parsing
+(valid array, invalid JSON falls back gracefully — returns 0 facts, does not
+raise). Test strengthen_relationships Cypher is called with the correct UNWIND
+pairs. Test consolidate_semantic query logic.
+```
+
+---
+
+## PHASE 23 — Episodic memory
+
+```
+Read CLAUDE.md and the design doc in full.
+
+Create transform_service/episodic_memory.py:
+
+  async def link_temporal_chain(meeting_id: str, meeting_date: str,
+                                  attendee_emails: list[str]) -> bool:
+    """Find the most recent previous meeting sharing ≥1 attendee email
+    and MERGE a PRECEDED_BY edge. Pure Cypher, no LM call.
+    Returns True if a link was created."""
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+      result = await session.run("""
+          MATCH (current:Meeting {id: $meeting_id})
+          MATCH (prev:Person)-[:ATTENDED]->(prior:Meeting)
+          WHERE prev.email IN $emails
+            AND prior.date < $meeting_date
+            AND prior.id <> $meeting_id
+          WITH prior ORDER BY prior.date DESC LIMIT 1
+          MERGE (current)-[p:PRECEDED_BY]->(prior)
+          ON CREATE SET p.gap_days = duration.inDays(
+              date(prior.date), date($meeting_date)).days,
+              p.created_at = $now
+          RETURN prior.id AS prior_id
+      """, meeting_id=meeting_id, emails=attendee_emails,
+          meeting_date=meeting_date, now=now)
+      record = await result.single()
+      return record is not None
+
+  async def detect_causality(meeting: ExtractedMeeting, meeting_id: str) -> int:
+    """Only runs when meeting.follow_up_needed is True.
+    Asks LM Studio whether this meeting references a prior decision or meeting.
+    If yes, finds the match and MERGEs CAUSED_BY. Returns count of causal
+    links created."""
+
+    if not meeting.follow_up_needed:
+        return 0
+
+    prompt_system = """You are analyzing whether a meeting was caused by a prior
+    decision or event. Given a meeting summary, identify if it explicitly continues
+    or responds to a prior decision. Respond ONLY with JSON:
+    {"references_prior": true/false, "reference_description": "one sentence or null"}"""
+    prompt_user = meeting.summary
+
+    # Call LM Studio (reuse extractor._get_client())
+    # If references_prior is False: return 0
+    # If True: search for a Decision node whose text has >50% word overlap
+    # with reference_description. If found: MERGE (m)-[:CAUSED_BY {confidence: 0.7}]->(d)
+    # If no Decision found, try Meeting nodes by title similarity.
+    # Cap at 1 causal link per meeting to avoid noise.
+
+    ...implement fully...
+    return links_created
+
+  async def decay_relevance() -> dict:
+    """Nightly: decay Meeting.relevance_weight by 5% per day, floor 0.1."""
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+      result = await session.run("""
+          MATCH (m:Meeting)
+          SET m.relevance_weight = CASE
+              WHEN m.relevance_weight IS NULL THEN 1.0
+              WHEN m.relevance_weight <= 0.1 THEN 0.1
+              ELSE m.relevance_weight * 0.95
+          END
+          RETURN count(m) AS updated
+      """)
+      record = await result.single()
+      return {"meetings_decayed": record["updated"] if record else 0}
+
+  async def log_memory_session(query_text: str, answer_text: str,
+                                node_ids: list[str]) -> str:
+    """Create a MemorySession node and ACCESSED edges to every contributing node.
+    Returns the session_id. Called by memory_retrieval.py, not graph_builder.py."""
+    import hashlib
+    session_id = uuid5_id("session", f"{now}{query_text}")
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+      await session.run("""
+          MERGE (ms:MemorySession {id: $session_id})
+          SET ms.query_text = $query_text,
+              ms.answer_text = $answer_text,
+              ms.nodes_accessed = $node_count,
+              ms.created_at = $now
+      """, session_id=session_id, query_text=query_text,
+          answer_text=answer_text, node_count=len(node_ids), now=now)
+      for node_id in node_ids:
+          await session.run("""
+              MATCH (ms:MemorySession {id: $session_id})
+              MATCH (n {id: $node_id})
+              MERGE (ms)-[:ACCESSED]->(n)
+          """, session_id=session_id, node_id=node_id)
+    return session_id
+
+Wire into transform_service/graph_builder.py:
+  After semantic_memory calls in process_email and process_calendar_event:
+    from transform_service import episodic_memory
+    emails = [a.email for a in meeting.attendees if a.email]
+    await episodic_memory.link_temporal_chain(node_id, str(meeting.date), emails)
+    await episodic_memory.detect_causality(meeting, node_id)
+  Same try/except wrapper — failures must not prevent mark_processed.
+
+  Additionally, on FIRST creation of a Meeting (before any algorithms),
+  set relevance_weight = 1.0. Add this to the MERGE in memgraph_client.py:
+    ON CREATE SET m.relevance_weight = 1.0
+
+Add to nightly APScheduler in main.py:
+  scheduler.add_job(episodic_memory.decay_relevance, "cron",
+                    hour=2, minute=30, id="nightly_decay")
+
+Add to main.py:
+  GET /graph/memory/sessions (returns last 20 MemorySession nodes, newest first)
+    MATCH (ms:MemorySession) RETURN ms ORDER BY ms.created_at DESC LIMIT 20
+
+Write tests: link_temporal_chain with a mock that has a prior meeting
+(assert edge created) and without (assert returns False). decay_relevance
+with mocked session (assert correct Cypher is run). log_memory_session
+with mocked driver (assert MemorySession node + ACCESSED edges). detect_causality
+with follow_up_needed=False (assert returns 0 without calling LM Studio).
+```
+
+---
+
+## PHASE 24 — Procedural memory
+
+```
+Read CLAUDE.md and the design doc in full.
+
+Update scripts/setup_memgraph.py — add seeded Procedure + ProcedureStep nodes
+AFTER the index creation, using MERGE so it's idempotent on re-run.
+Seed exactly these six procedures with their steps:
+
+  sprint_planning:
+    Steps (in order): 1. Review previous sprint outcomes
+                      2. Groom and prioritise backlog
+                      3. Estimate story points
+                      4. Commit to sprint goal
+                      5. Assign tasks to team members
+
+  client_review:
+    Steps: 1. Present deliverables
+           2. Collect client feedback
+           3. Document decisions and change requests
+           4. Agree on next steps
+
+  one_on_one:
+    Steps: 1. Check-in on priorities
+           2. Surface blockers
+           3. Career development discussion
+           4. Agree on action items
+
+  incident_response:
+    Steps: 1. Confirm incident and severity
+           2. Assemble response team
+           3. Diagnose root cause
+           4. Apply fix or mitigation
+           5. Write post-mortem
+
+  project_kickoff:
+    Steps: 1. Introduce stakeholders
+           2. Define project scope and goals
+           3. Agree on timeline and milestones
+           4. Assign ownership
+           5. Schedule follow-up checkpoints
+
+  retrospective:
+    Steps: 1. What went well
+           2. What could be improved
+           3. Action items for next iteration
+
+  For each procedure, MERGE the Procedure node with:
+    id = uuid5_id("procedure", name)
+    name, description, is_inferred = false, occurrence_count = 0
+    match_pattern = JSON string of the criteria dict (for reference/debugging)
+
+  MERGE ProcedureStep nodes with HAS_STEP and NEXT_STEP edges.
+  Use a consistent id: uuid5_id("step", f"{procedure_name}:{order}")
+
+Create transform_service/procedural_memory.py:
+
+  KNOWN_PROCEDURE_PATTERNS: dict mapping procedure name to a match dict:
+    {
+      "sprint_planning": {
+          "kind": ["meeting"],
+          "min_attendees": 3,
+          "topic_keywords": ["sprint", "backlog", "velocity", "story points", "standup"]
+      },
+      "client_review": {
+          "topic_keywords": ["client", "demo", "feedback", "presentation", "review"],
+          "requires_multi_org": True
+      },
+      "one_on_one": {
+          "max_attendees": 2,
+          "min_attendees": 2
+      },
+      "incident_response": {
+          "topic_keywords": ["incident", "outage", "bug", "hotfix", "urgent", "down", "p0", "p1"]
+      },
+      "project_kickoff": {
+          "topic_keywords": ["kickoff", "onboarding", "new project", "launch", "initiation"]
+      },
+      "retrospective": {
+          "topic_keywords": ["retro", "retrospective", "what went well", "improvements", "lessons"]
+      }
+    }
+
+  def _matches_pattern(meeting: ExtractedMeeting, pattern: dict) -> bool:
+    """Pure Python — no async, no Cypher. Check meeting against one pattern dict.
+    keyword matching is case-insensitive substring matching against meeting.topics."""
+    ...
+
+  async def match_to_procedure(meeting: ExtractedMeeting, meeting_id: str,
+                                attendee_emails: list[str]) -> list[str]:
+    """Check meeting against all known patterns. For each match:
+      - MERGE (m:Meeting)-[:FOLLOWS_PROCEDURE {confidence: 0.8}]->(p:Procedure)
+      - Increment Procedure.occurrence_count by 1
+    Returns list of matched procedure names."""
+    matched = []
+    for proc_name, pattern in KNOWN_PROCEDURE_PATTERNS.items():
+      if _matches_pattern(meeting, pattern):
+          proc_id = uuid5_id("procedure", proc_name)
+          # MERGE the edge and increment count in one Cypher statement
+          ...
+          matched.append(proc_name)
+    return matched
+
+  async def discover_procedures() -> dict:
+    """Nightly job. Find groups of meetings with:
+      - same community_id (persons who share a community)
+      - >= 60% topic overlap between meetings in the group
+      - >= 5 meetings that haven't been matched to any Procedure yet
+    For each qualifying group: create a new Procedure {is_inferred: True}
+    and MERGE FOLLOWS_PROCEDURE edges to the meetings.
+    
+    Implementation approach:
+      1. MATCH meetings not yet linked to any Procedure (no FOLLOWS_PROCEDURE edge)
+         grouped by community_id of their attendees
+      2. Within each community group, load their topic lists into Python
+      3. For each pair of meetings in the group, compute overlap via
+         graph_algorithms.get_jaccard_similarity() on their Topic neighbors
+         OR simple Python set intersection on topic name lists (simpler, use this)
+      4. Cluster meetings where average pairwise overlap >= 0.6
+      5. If cluster size >= 5 and no existing Procedure matches:
+           create Procedure node with:
+             name = f"inferred_{community_id}_{cluster_index}"
+             description = f"Inferred pattern from {len(cluster)} meetings"
+             is_inferred = True
+             occurrence_count = len(cluster)
+           MERGE FOLLOWS_PROCEDURE edges to all cluster meetings
+    Return dict: {clusters_found, procedures_created}"""
+    ...
+
+Wire into transform_service/graph_builder.py:
+  After episodic_memory calls:
+    from transform_service import procedural_memory
+    emails = [a.email for a in meeting.attendees if a.email]
+    matched = await procedural_memory.match_to_procedure(meeting, node_id, emails)
+    if matched:
+        log.info("graph_builder.procedures_matched", procedures=matched)
+  Same try/except wrapper.
+
+Add to nightly APScheduler in main.py:
+  scheduler.add_job(procedural_memory.discover_procedures, "cron",
+                    hour=2, minute=45, id="nightly_discover_procedures")
+
+Add to main.py:
+  GET /graph/procedures — list all Procedure nodes with occurrence_count,
+    is_inferred, and their ProcedureStep names in order
+  GET /graph/procedures/{procedure_name} — detailed view: steps + meetings that
+    followed this procedure (MATCH (m)-[:FOLLOWS_PROCEDURE]->(p) RETURN m)
+
+Write tests: _matches_pattern with matching and non-matching meeting fixtures
+(no async, no mocks needed — pure Python). match_to_procedure: mock driver,
+assert correct MERGE Cypher is called for a sprint_planning meeting. discover_procedures:
+mock driver returning a set of meetings with known topics, assert Procedure node
+created when cluster criteria met, not created when cluster too small.
+```
+
+---
+
+## PHASE 25 — Memory retrieval + docs
+
+```
+Read CLAUDE.md and the design doc in full.
+
+Create transform_service/memory_retrieval.py:
+
+  Reuse extractor._get_client() — do NOT create a new LLM client.
+
+  async def _extract_entities(question: str) -> dict:
+    """Short LM Studio call. Extract structured entities from the question.
+    Prompt system: "Extract entities from this question. Respond ONLY with JSON:
+    {\"people\": [\"name\"], \"topics\": [\"keyword\"], \"date_hint\": \"string or null\"}
+    Be conservative — only extract clearly named entities."
+    Returns dict with people, topics, date_hint. On parse failure: return
+    {"people": [], "topics": [], "date_hint": None}. Do NOT raise."""
+    ...
+
+  async def _assemble_context(entities: dict) -> tuple[dict, list[str]]:
+    """Query the graph for relevant nodes. Returns (context_dict, node_ids_used).
+    Cap at 20 total nodes to avoid LM context overflow.
+    
+    For each person name in entities["people"]:
+      MATCH (p:Person) WHERE p.name CONTAINS $name
+      RETURN p + p.pagerank_score + p.community_id +
+             [(p)-[:HAS_FACT]->(f) | f.text][..5] +   // up to 5 facts
+             [(p)-[:PREFERS]->(pref) | pref.value][..3] +  // 3 preferences
+             [(p)-[:ATTENDED]->(m:Meeting) | m] ORDER BY m.relevance_weight DESC [..3]
+    
+    For each topic in entities["topics"]:
+      MATCH (t:Topic {name: $topic})-[:DISCUSSED]-(m:Meeting)
+      RETURN t + meetings ORDER BY m.relevance_weight DESC LIMIT 3
+
+    Return context_dict structured as:
+      {
+        "people": [
+          {"name": ..., "email": ..., "pagerank_score": ..., "community_id": ...,
+           "facts": [...], "preferences": [...], "recent_meetings": [...]}
+        ],
+        "topics": [{"name": ..., "recent_meetings": [...]}],
+        "algorithm_summary": "Top person by PageRank: X. Found N communities."
+      }
+    node_ids_used = all node IDs accessed across all queries."""
+    ...
+
+  async def _synthesize(question: str, context: dict) -> str:
+    """Call LM Studio with assembled graph context.
+    System: "You are a meeting memory assistant with access to a structured
+    knowledge graph. Answer the question using ONLY the context below.
+    Be specific and cite names and dates when available. If the context
+    does not contain enough information, say so — do not guess.
+    Context: {json.dumps(context, default=str, indent=2)}"
+    User: question
+    Returns the model's answer string. On API error, return a graceful
+    fallback message — do NOT raise."""
+    ...
+
+  async def full_memory_query(question: str) -> dict:
+    """Orchestrate the three steps. Always returns a dict even on partial failure.
+    After synthesis: call episodic_memory.log_memory_session() to record the session.
+    Returns:
+      {
+        "answer": str,
+        "session_id": str,
+        "nodes_used": [{"id": ..., "type": ...}],
+        "context_summary": {"people_found": N, "topics_found": N}
+      }"""
+    ...
+
+  async def person_memory_profile(email: str) -> dict:
+    """Return the full memory profile for one person:
+      - semantic: facts (HAS_FACT), preferences (PREFERS), KNOWS connections
+      - episodic: last 10 meetings with relevance_weight, PRECEDED_BY chain depth
+      - procedural: Procedures this person's meetings follow (via FOLLOWS_PROCEDURE)
+      - algorithms: pagerank_score, community_id, betweenness_centrality
+    All from Cypher queries — no LM call. Returns {} if person not found."""
+    ...
+
+Add endpoints to transform_service/main.py:
+
+  POST /graph/memory/query
+    Body: {"question": str}
+    Response: full_memory_query result dict
+    On empty question: 400 Bad Request.
+
+  GET /graph/memory/person/{email}
+    → person_memory_profile(email)
+    On not found: 404 with detail.
+
+Update CLAUDE.md:
+  Add a new section "## Graph Memory + Advanced Algorithms" after the
+  "## Autonomous Dev Agent" section:
+
+    - graph_algorithms.py is the ONLY place for MAGE CALL procedures.
+      Never embed CALL module.procedure() in memgraph_client.py, graph_builder.py,
+      main.py, or any memory module.
+    - semantic_memory.py owns Fact and Preference nodes.
+    - episodic_memory.py owns PRECEDED_BY, CAUSED_BY, MemorySession nodes,
+      and the relevance_weight decay.
+    - procedural_memory.py owns Procedure and ProcedureStep nodes.
+    - memory_retrieval.py is the only module that calls full_memory_query and
+      person_memory_profile — never call these from graph_builder.py or main.py
+      directly (those are query-time, not ingestion-time).
+    - All LM Studio calls in memory modules reuse extractor._get_client() —
+      no new AsyncOpenAI instances.
+
+  Add to Absolute Rules:
+    DO NOT add MAGE CALL procedures outside graph_algorithms.py
+    DO NOT call memory_retrieval functions during ingestion (graph_builder.py)
+    DO NOT write MemorySession nodes outside episodic_memory.log_memory_session()
+
+Create docs/GRAPH_MEMORY.md, matching the style of docs/DEV_AGENT.md:
+  1. Overview of the three memory types and what they store in this project
+  2. How to query the memory: POST /graph/memory/query examples
+  3. How algorithm scores are computed and when they update
+  4. How procedures are matched (known) and discovered (inferred)
+  5. The MCP server already exposes all of this — any Claude Desktop query
+     like "who are the most influential people in my meetings?" now works
+     because pagerank_score is a queryable node property
+  6. Schema diagram (text-based, ASCII) showing new node types and edges
+
+Write tests: _extract_entities with valid JSON from mocked LM Studio,
+invalid JSON from mocked LM Studio (assert returns empty dict, no raise).
+full_memory_query: mock _extract_entities, _assemble_context, _synthesize,
+log_memory_session — assert all called and result dict has required keys.
+person_memory_profile: mock driver — assert 404 behavior when no person found.
+```
+
+---
+
+## Notes on running Phases 21-25
+
+- Run Phase 21 FIRST and verify MAGE is available before any other phase:
+    make cypher  # then run: CALL mg.procedures() YIELD name WHERE name STARTS WITH 'pagerank' RETURN name;
+  If that returns nothing, stop — the image doesn't have MAGE bundled and you
+  need to investigate before proceeding.
+- Phases 22-24 can only be wired into graph_builder.py after Phase 21 is done
+  (they depend on graph_algorithms being imported and working).
+- Phase 25 depends on all of 21-24 (it queries nodes written by all of them).
+- After each phase: `make test` before proceeding. After Phase 21: also run
+  `make trigger` and check `make logs` to confirm the fast algorithm run fires
+  after a processed meeting.
+- The nightly jobs (full recompute, consolidation, decay, discovery) will NOT
+  fire during dev — test them by calling the functions directly via make trigger
+  or a manual curl to the /webhook/airbyte endpoint, then checking Memgraph.
+- Procedures seeded in setup_memgraph.py need `make setup-memgraph` to be re-run
+  after Phase 24's changes land (it's idempotent — safe to re-run on a live graph).
+- Superpowers will trigger TDD automatically — let it. Don't skip tests.
+- If a phase feels too big, use /plan from forge-skills to break it down further.

@@ -5,7 +5,7 @@ from typing import List
 
 import structlog
 
-from transform_service import db, memgraph_client
+from transform_service import db, episodic_memory, graph_algorithms, memgraph_client, procedural_memory, semantic_memory, vector_memory
 from transform_service.classifier import classify
 from transform_service.extractor import extract_meeting
 from transform_service.jira_pusher import push_action_items
@@ -41,7 +41,23 @@ async def process_email(email: RawEmail) -> bool:
             node_id = await memgraph_client.upsert_meeting_graph(meeting, email.source_id)
 
         bound = bound.bind(step="jira_push")
-        await push_action_items(meeting.action_items, meeting, node_id)
+        await push_action_items(meeting.action_items, meeting, email.source_id)
+
+        try:
+            await graph_algorithms.run_fast_algorithms()
+            await semantic_memory.extract_facts(meeting, node_id)
+            await semantic_memory.infer_preferences(meeting, node_id)
+            await semantic_memory.strengthen_relationships(meeting, node_id)
+            emails = [a.email for a in meeting.attendees if a.email]
+            await episodic_memory.link_temporal_chain(node_id, str(meeting.date), emails)
+            await episodic_memory.detect_causality(meeting, node_id)
+            matched = await procedural_memory.match_to_procedure(meeting, node_id, emails)
+            if matched:
+                log.info("graph_builder.procedures_matched", procedures=matched, meeting_id=node_id)
+            await vector_memory.embed_meeting(node_id, meeting.summary)
+            await vector_memory.embed_facts_for_meeting(node_id)
+        except Exception as exc:
+            log.warning("graph_builder.memory_skipped", error=str(exc))
 
         await db.mark_processed(email.source_table, email.id)
         bound.info("graph_builder.email_processed", score=round(score, 3), node_id=node_id)
@@ -102,7 +118,23 @@ async def process_calendar_event(event: RawCalendarEvent) -> bool:
             node_id = await memgraph_client.upsert_meeting_graph(meeting, event.source_id)
 
         bound = bound.bind(step="jira_push")
-        await push_action_items(meeting.action_items, meeting, node_id)
+        await push_action_items(meeting.action_items, meeting, event.source_id)
+
+        try:
+            await graph_algorithms.run_fast_algorithms()
+            await semantic_memory.extract_facts(meeting, node_id)
+            await semantic_memory.infer_preferences(meeting, node_id)
+            await semantic_memory.strengthen_relationships(meeting, node_id)
+            emails = [a.email for a in meeting.attendees if a.email]
+            await episodic_memory.link_temporal_chain(node_id, str(meeting.date), emails)
+            await episodic_memory.detect_causality(meeting, node_id)
+            matched = await procedural_memory.match_to_procedure(meeting, node_id, emails)
+            if matched:
+                log.info("graph_builder.procedures_matched", procedures=matched, meeting_id=node_id)
+            await vector_memory.embed_meeting(node_id, meeting.summary)
+            await vector_memory.embed_facts_for_meeting(node_id)
+        except Exception as exc:
+            log.warning("graph_builder.memory_skipped", error=str(exc))
 
         await db.mark_processed(event.source_table, event.id)
         bound.info("graph_builder.event_processed", score=round(score, 3), node_id=node_id)

@@ -234,6 +234,31 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
 
 ---
 
+## Graph Memory + Advanced Algorithms
+
+- `graph_algorithms.py` is the ONLY place for MAGE `CALL` procedures.
+  Never embed `CALL module.procedure()` in `memgraph_client.py`, `graph_builder.py`,
+  `main.py`, or any memory module.
+- `semantic_memory.py` owns `Fact` and `Preference` nodes and `HAS_FACT`, `PREFERS`,
+  `KNOWS`, `INTERESTED_IN` edges.
+- `episodic_memory.py` owns `PRECEDED_BY`, `CAUSED_BY`, `MemorySession` nodes,
+  and the `relevance_weight` decay.
+- `procedural_memory.py` owns `Procedure` and `ProcedureStep` nodes and
+  `FOLLOWS_PROCEDURE`, `HAS_STEP`, `NEXT_STEP` edges.
+- `memory_retrieval.py` is the only module that exposes `full_memory_query` and
+  `person_memory_profile` — never call these from `graph_builder.py` or `main.py`
+  directly (those are query-time, not ingestion-time).
+- `vector_memory.py` owns the `embedding` property on `Meeting` and `Fact` nodes
+  (same pattern as `graph_algorithms.py` writing algorithm scores onto nodes it
+  doesn't otherwise own). It generates embeddings via LM Studio's
+  `/v1/embeddings` endpoint (`LM_STUDIO_EMBEDDING_MODEL`) and calls
+  `graph_algorithms.vector_search()` for nearest-neighbor lookups — it never
+  issues `CALL vector_search.*` directly.
+- All LM Studio calls in memory modules reuse `extractor._get_client()` —
+  no new `AsyncOpenAI` instances.
+
+---
+
 ## Absolute Rules — Do NOT Violate
 
 - DO NOT use Ollama (replaced by LM Studio)
@@ -252,6 +277,9 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
 - DO NOT auto-merge PRs opened by the dev agent — human review is the one remaining checkpoint; do not jump ahead of it
 - DO NOT put Jira REST calls outside `jira_client.py` (applies to `dev_agent` and `transform_service` alike)
 - DO NOT let `dev_agent` default `is_engineering_task` to `True` when missing — fail safe toward NOT auto-implementing
+- DO NOT add MAGE CALL procedures outside `graph_algorithms.py`
+- DO NOT call `memory_retrieval` functions during ingestion (`graph_builder.py`)
+- DO NOT write `MemorySession` nodes outside `episodic_memory.log_memory_session()`
 
 ---
 
@@ -261,6 +289,7 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
 # LM Studio
 LM_STUDIO_BASE_URL=http://host.docker.internal:1234/v1
 LM_STUDIO_MODEL=gemma3-12b  # exact model name as shown in LM Studio
+LM_STUDIO_EMBEDDING_MODEL=text-embedding-nomic-embed-text-v1.5  # must also be loaded in LM Studio
 
 # Local Postgres
 POSTGRES_HOST=postgres

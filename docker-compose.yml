@@ -16,20 +16,28 @@ services:
       retries: 5
 
   memgraph:
-    image: memgraph/memgraph-platform:latest
+    image: memgraph/memgraph-mage:3.11.0
     ports:
       - "7687:7687"
-      - "7444:7444"
-      - "3000:3000"
     volumes:
-      - memgraph_data:/var/lib/memgraph
-    environment:
-      MEMGRAPH_ARGS: "--log-level=WARNING"
+      - memgraph_data_3x:/var/lib/memgraph
+    command: ["--log-level=WARNING"]
     healthcheck:
       test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole --no-history 2>/dev/null || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
+
+  lab:
+    image: memgraph/lab:3.11.0
+    ports:
+      - "3000:3000"
+    environment:
+      QUICK_CONNECT_MG_HOST: memgraph
+      QUICK_CONNECT_MG_PORT: "7687"
+    depends_on:
+      memgraph:
+        condition: service_healthy
 
   memgraph-mcp:
     image: memgraph/mcp-memgraph:latest
@@ -108,4 +116,5 @@ services:
 volumes:
   postgres_data:
   memgraph_data:
+  memgraph_data_3x:
   dev_agent_repo:

@@ -8,11 +8,12 @@ from typing import Any, Dict
 import httpx
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from transform_service import db, memgraph_client
+from transform_service import db, episodic_memory, graph_algorithms, memgraph_client, procedural_memory, semantic_memory, vector_memory
+from transform_service.memory_retrieval import full_memory_query, person_memory_profile
 from transform_service.digest import weekly_digest
 from transform_service.graph_builder import process_new_emails, process_new_events
 from transform_service.jira_agent import process_jira_issues
@@ -72,6 +73,26 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(process_new_emails, "interval", minutes=5, id="poll_emails")
     scheduler.add_job(process_new_events, "interval", minutes=5, id="poll_events")
     scheduler.add_job(process_jira_issues, "interval", minutes=5, id="poll_jira")
+    scheduler.add_job(
+        graph_algorithms.run_full_algorithms,
+        "cron", hour=2, minute=0,
+        id="nightly_algorithms",
+    )
+    scheduler.add_job(
+        semantic_memory.consolidate_semantic,
+        "cron", hour=2, minute=15,
+        id="nightly_consolidate_semantic",
+    )
+    scheduler.add_job(
+        episodic_memory.decay_relevance,
+        "cron", hour=2, minute=30,
+        id="nightly_decay",
+    )
+    scheduler.add_job(
+        procedural_memory.discover_procedures,
+        "cron", hour=2, minute=45,
+        id="nightly_discover_procedures",
+    )
     scheduler.start()
     log.info("service.scheduler_started", interval_minutes=5)
 
@@ -172,3 +193,133 @@ async def timeline(window: str = "week") -> Dict[str, Any]:
 @app.get("/graph/digest/weekly")
 async def digest_weekly() -> Dict[str, Any]:
     return await weekly_digest()
+
+
+@app.get("/graph/insights/influential")
+async def insights_influential(label: str = "Person", limit: int = 10) -> Dict[str, Any]:
+    nodes = await memgraph_client.get_influential_nodes(label=label, limit=limit)
+    return {"label": label, "nodes": nodes, "count": len(nodes)}
+
+
+@app.get("/graph/insights/communities")
+async def insights_communities() -> Dict[str, Any]:
+    communities = await memgraph_client.get_all_communities()
+    return {"communities": communities, "count": len(communities)}
+
+
+@app.get("/graph/insights/bridges")
+async def insights_bridges(limit: int = 10) -> Dict[str, Any]:
+    nodes = await memgraph_client.get_bridge_nodes(limit=limit)
+    return {"nodes": nodes, "count": len(nodes)}
+
+
+@app.get("/graph/insights/node/{node_id}")
+async def insights_node(node_id: str) -> Dict[str, Any]:
+    result = await memgraph_client.get_node_insights(node_id)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+    return result
+
+
+@app.get("/graph/procedures")
+async def list_procedures() -> Dict[str, Any]:
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (p:Procedure)
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(s:ProcedureStep)
+            RETURN p.id AS id, p.name AS name, p.description AS description,
+                   p.is_inferred AS is_inferred,
+                   p.occurrence_count AS occurrence_count,
+                   collect({order: s.order, name: s.name}) AS steps
+            ORDER BY occurrence_count DESC
+            """
+        )
+        procedures = [dict(r) async for r in result]
+    return {"procedures": procedures, "count": len(procedures)}
+
+
+@app.get("/graph/procedures/{procedure_name}")
+async def get_procedure(procedure_name: str) -> Dict[str, Any]:
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+        proc_result = await session.run(
+            """
+            MATCH (p:Procedure {name: $name})
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(s:ProcedureStep)
+            RETURN p.id AS id, p.name AS name, p.description AS description,
+                   p.is_inferred AS is_inferred,
+                   p.occurrence_count AS occurrence_count,
+                   collect({order: s.order, name: s.name}) AS steps
+            """,
+            name=procedure_name,
+        )
+        procs = [dict(r) async for r in proc_result]
+        if not procs:
+            raise HTTPException(status_code=404, detail=f"Procedure not found: {procedure_name}")
+        proc = procs[0]
+
+        meetings_result = await session.run(
+            """
+            MATCH (m:Meeting)-[:FOLLOWS_PROCEDURE]->(p:Procedure {name: $name})
+            RETURN m.id AS id, m.title AS title, m.date AS date,
+                   m.kind AS kind, m.relevance_weight AS relevance_weight
+            ORDER BY m.date DESC
+            LIMIT 20
+            """,
+            name=procedure_name,
+        )
+        proc["meetings"] = [dict(r) async for r in meetings_result]
+    return proc
+
+
+@app.post("/graph/memory/query")
+async def memory_query(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    question = (body.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question must be a non-empty string")
+    return await full_memory_query(question)
+
+
+@app.get("/graph/memory/person/{email}")
+async def memory_person(email: str) -> Dict[str, Any]:
+    profile = await person_memory_profile(email)
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"Person not found: {email}")
+    return profile
+
+
+@app.get("/graph/memory/sessions")
+async def memory_sessions() -> Dict[str, Any]:
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (ms:MemorySession)
+            RETURN ms.id AS id, ms.query_text AS query_text,
+                   ms.answer_text AS answer_text,
+                   ms.nodes_accessed AS nodes_accessed,
+                   ms.created_at AS created_at
+            ORDER BY ms.created_at DESC
+            LIMIT 20
+            """
+        )
+        sessions_data = [dict(r) async for r in result]
+    return {"sessions": sessions_data, "count": len(sessions_data)}
+
+
+@app.get("/graph/search/meetings")
+async def search_meetings(q: str, limit: int = 5) -> Dict[str, Any]:
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="q must be a non-empty string")
+    results = await vector_memory.search_similar_meetings(q, limit=limit)
+    return {"query": q, "results": results, "count": len(results)}
+
+
+@app.get("/graph/search/facts")
+async def search_facts(q: str, limit: int = 5) -> Dict[str, Any]:
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="q must be a non-empty string")
+    results = await vector_memory.search_similar_facts(q, limit=limit)
+    return {"query": q, "results": results, "count": len(results)}

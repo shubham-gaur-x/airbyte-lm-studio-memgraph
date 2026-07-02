@@ -89,7 +89,7 @@ async def _create_jira_issue(
 async def push_action_items(
     action_items: List[ActionItem],
     meeting: ExtractedMeeting,
-    meeting_node_id: str,
+    source_id: str,
 ) -> List[str]:
     if not os.environ.get("JIRA_ENABLED", "false").lower() == "true":
         return []
@@ -111,7 +111,10 @@ async def push_action_items(
             sprint_id = None
 
         for i, action in enumerate(action_items):
-            action_id = uuid5_id("action", f"{meeting_node_id}:{i}:{action.task}")
+            # Must match memgraph_client.upsert_meeting_graph's derivation exactly —
+            # that function seeds ActionItem.id from the raw source_id, not the
+            # Meeting node's id, or this MATCH silently matches zero nodes.
+            action_id = uuid5_id("action", f"{source_id}:{i}:{action.task}")
             description = (
                 f"From meeting: {meeting.title} ({meeting.date})\n"
                 f"Owner: {action.owner}\n"
@@ -143,7 +146,7 @@ async def push_action_items(
 
     log.info(
         "jira_pusher.batch_done",
-        meeting_id=meeting_node_id,
+        source_id=source_id,
         total=len(action_items),
         created=len(created_keys),
         keys=created_keys,
