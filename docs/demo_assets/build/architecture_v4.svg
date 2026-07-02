@@ -1,0 +1,214 @@
+<svg viewBox="0 0 1920 1180" xmlns="http://www.w3.org/2000/svg" font-family="Calibri, Arial, sans-serif">
+  <defs>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#F59E0B"/></marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#10B981"/></marker>
+  </defs>
+  <rect x="0" y="0" width="1920" height="1180" fill="#12162B"/>
+
+  <!-- Title -->
+  <text x="960" y="50" text-anchor="middle" font-size="30" font-weight="700" fill="#FFFFFF">meeting-memory v4 — Airbyte ELT + Local Intelligence Stack</text>
+  <text x="960" y="78" text-anchor="middle" font-size="15" fill="#94A3B8">Everything below the Airbyte line runs on one Mac. No cloud LLM, no cloud database.</text>
+
+  <!-- LEFT PANEL HEADER -->
+  <rect x="24" y="104" width="915" height="46" rx="8" fill="#0B3B57" stroke="#0EA5E9" stroke-width="1.5"/>
+  <text x="481" y="133" text-anchor="middle" font-size="19" font-weight="700" fill="#7DD3FC">INGESTION + CORE GRAPH — Built</text>
+
+  <!-- RIGHT PANEL HEADER -->
+  <rect x="971" y="104" width="925" height="46" rx="8" fill="#2E1065" stroke="#8B5CF6" stroke-width="1.5"/>
+  <text x="1433" y="133" text-anchor="middle" font-size="19" font-weight="700" fill="#C4B5FD">INTELLIGENCE + AGENTS — Built</text>
+
+  <!-- ============ LEFT COLUMN ============ -->
+
+  <!-- Data sources -->
+  <text x="24" y="178" font-size="13" font-weight="700" letter-spacing="1.5" fill="#38BDF8">DATA SOURCES</text>
+  <g font-size="13">
+    <rect x="24" y="188" width="290" height="70" rx="6" fill="#0F2A3D" stroke="#38BDF8" stroke-width="1"/>
+    <text x="169" y="216" text-anchor="middle" font-size="16" font-weight="700" fill="#FFFFFF">Gmail</text>
+    <text x="169" y="238" text-anchor="middle" fill="#94A3B8">gmail.readonly · incremental</text>
+
+    <rect x="322" y="188" width="290" height="70" rx="6" fill="#0F2A3D" stroke="#38BDF8" stroke-width="1"/>
+    <text x="467" y="216" text-anchor="middle" font-size="16" font-weight="700" fill="#FFFFFF">Google Calendar</text>
+    <text x="467" y="238" text-anchor="middle" fill="#94A3B8">calendar.readonly</text>
+
+    <rect x="620" y="188" width="319" height="70" rx="6" fill="#0F2A3D" stroke="#38BDF8" stroke-width="1"/>
+    <text x="779" y="216" text-anchor="middle" font-size="16" font-weight="700" fill="#FFFFFF">Jira Cloud</text>
+    <text x="779" y="238" text-anchor="middle" fill="#94A3B8">source connector (read) + bidirectional</text>
+  </g>
+
+  <!-- Airbyte ELT -->
+  <text x="24" y="290" font-size="13" font-weight="700" letter-spacing="1.5" fill="#38BDF8">AIRBYTE CLOUD ELT</text>
+  <rect x="24" y="300" width="915" height="66" rx="6" fill="#082F49" stroke="#0EA5E9" stroke-width="1.5"/>
+  <text x="481" y="328" text-anchor="middle" font-size="16" font-weight="700" fill="#7DD3FC">3 Connections → Local Postgres</text>
+  <text x="481" y="350" text-anchor="middle" font-size="12.5" fill="#94A3B8">Incremental · Append+Dedup · Cron (5min) · Webhook on sync complete → transform_service</text>
+
+  <!-- Postgres staging -->
+  <text x="24" y="400" font-size="13" font-weight="700" letter-spacing="1.5" fill="#38BDF8">LOCAL POSTGRES STAGING (Docker)</text>
+  <rect x="24" y="410" width="915" height="76" rx="6" fill="#0F2A3D" stroke="#0EA5E9" stroke-width="1"/>
+  <g font-size="12.5" fill="#CBD5E1">
+    <text x="46" y="440">raw_emails</text>
+    <text x="200" y="440">raw_calendar_events</text>
+    <text x="420" y="440">raw_jira_issues</text>
+    <text x="600" y="440" fill="#94A3B8">processed_flag → exactly-once semantics</text>
+    <text x="46" y="465" fill="#94A3B8">Airbyte writes here directly · APScheduler polls every 5 min as a fallback to the webhook</text>
+  </g>
+
+  <!-- Transform service -->
+  <text x="24" y="516" font-size="13" font-weight="700" letter-spacing="1.5" fill="#38BDF8">TRANSFORM SERVICE — FastAPI + APScheduler (:8000)</text>
+  <rect x="24" y="526" width="915" height="150" rx="6" fill="#1C1408" stroke="#F59E0B" stroke-width="1.5"/>
+  <g font-size="12.5">
+    <rect x="42" y="542" width="205" height="118" rx="5" fill="#241a0a" stroke="#8a5a10"/>
+    <text x="144" y="562" text-anchor="middle" font-weight="700" fill="#FBBF24">classifier.py</text>
+    <text x="144" y="582" text-anchor="middle" fill="#94A3B8">rules-based scorer</text>
+    <text x="144" y="600" text-anchor="middle" fill="#94A3B8">score ≥ 0.40</text>
+    <text x="144" y="618" text-anchor="middle" fill="#94A3B8">no LLM call</text>
+
+    <rect x="257" y="542" width="205" height="118" rx="5" fill="#241a0a" stroke="#8a5a10"/>
+    <text x="359" y="562" text-anchor="middle" font-weight="700" fill="#FBBF24">extractor.py</text>
+    <text x="359" y="582" text-anchor="middle" fill="#94A3B8">LM Studio (local)</text>
+    <text x="359" y="600" text-anchor="middle" fill="#94A3B8">gemma-3-12b</text>
+    <text x="359" y="618" text-anchor="middle" fill="#94A3B8">temp=0.0, JSON mode</text>
+
+    <rect x="472" y="542" width="205" height="118" rx="5" fill="#241a0a" stroke="#8a5a10"/>
+    <text x="574" y="562" text-anchor="middle" font-weight="700" fill="#FBBF24">graph_builder.py</text>
+    <text x="574" y="582" text-anchor="middle" fill="#94A3B8">MERGE in one</text>
+    <text x="574" y="600" text-anchor="middle" fill="#94A3B8">ACID transaction</text>
+    <text x="574" y="618" text-anchor="middle" fill="#94A3B8">→ fires intelligence layer</text>
+
+    <rect x="687" y="542" width="212" height="118" rx="5" fill="#241a0a" stroke="#8a5a10"/>
+    <text x="793" y="562" text-anchor="middle" font-weight="700" fill="#FBBF24">jira_pusher.py</text>
+    <text x="793" y="582" text-anchor="middle" fill="#94A3B8">ActionItem →</text>
+    <text x="793" y="600" text-anchor="middle" fill="#94A3B8">Jira sprint/backlog</text>
+    <text x="793" y="618" text-anchor="middle" fill="#94A3B8">via jira_client.py</text>
+  </g>
+
+  <!-- Local Memgraph -->
+  <text x="24" y="702" font-size="13" font-weight="700" letter-spacing="1.5" fill="#38BDF8">LOCAL MEMGRAPH (Docker) — bolt://memgraph:7687</text>
+  <rect x="24" y="712" width="915" height="118" rx="6" fill="#2C0B2E" stroke="#EC4899" stroke-width="1.5"/>
+  <g font-size="12.5" fill="#CBD5E1">
+    <text x="46" y="738" fill="#F9A8D4" font-weight="700">11 node types</text>
+    <text x="46" y="758">Meeting(74) · Person(7) · Topic(43) · Fact(5) · Procedure(6) · Organization(3) · ActionItem(3) · MemorySession(2) …</text>
+    <text x="46" y="782" fill="#F9A8D4" font-weight="700">17 edge types — 264 total</text>
+    <text x="46" y="802">ATTENDED · DISCUSSED · KNOWS · PRECEDED_BY</text>
+    <text x="46" y="820">CAUSED_BY · FOLLOWS_PROCEDURE · HAS_FACT · ACCESSED …</text>
+  </g>
+  <rect x="702" y="734" width="215" height="76" rx="5" fill="#3B0764" stroke="#A78BFA"/>
+  <text x="809" y="756" text-anchor="middle" font-weight="700" fill="#DDD6FE">Memgraph MCP</text>
+  <text x="809" y="775" text-anchor="middle" font-size="11.5" fill="#94A3B8">:8001 · MCP_READ_ONLY=false</text>
+  <text x="809" y="792" text-anchor="middle" font-size="11.5" fill="#94A3B8">Claude Desktop / any agent</text>
+
+  <!-- Jira output -->
+  <text x="24" y="854" font-size="13" font-weight="700" letter-spacing="1.5" fill="#38BDF8">JIRA (shubhamgaur1.atlassian.net, project SCRUM)</text>
+  <rect x="24" y="864" width="915" height="60" rx="6" fill="#0F2A3D" stroke="#38BDF8" stroke-width="1"/>
+  <text x="46" y="890" font-size="13" fill="#CBD5E1">Action items pushed as Tasks, labeled meeting-action-item</text>
+  <text x="46" y="910" font-size="12.5" fill="#94A3B8">Status changes in Jira flow back in via Airbyte's Jira source — see JIRA READ-BACK, right →</text>
+
+  <!-- Removed-since-v3 note -->
+  <rect x="24" y="944" width="915" height="98" rx="6" fill="#1F0A0A" stroke="#EF4444" stroke-width="1"/>
+  <text x="46" y="968" font-size="13" font-weight="700" fill="#FCA5A5">Removed since v3 — no longer in this stack</text>
+  <text x="46" y="990" font-size="12" fill="#FCA5A5" font-family="Courier New, monospace">Groq API · Render.com · Neon Postgres · Memgraph Cloud · ngrok · Ollama</text>
+  <text x="46" y="1012" font-size="12" fill="#94A3B8">Airbyte Cloud is the one dependency kept — it's the right tool for ingestion, not a cost center.</text>
+
+  <!-- LM Studio box, bridging both columns -->
+  <rect x="24" y="1058" width="915" height="70" rx="6" fill="#052E1B" stroke="#10B981" stroke-width="1.5"/>
+  <text x="481" y="1086" text-anchor="middle" font-size="15" font-weight="700" fill="#6EE7B7">LM Studio — runs on the host Mac, not in Docker</text>
+  <text x="481" y="1108" text-anchor="middle" font-size="12" fill="#94A3B8">:1234 · gemma-3-12b (chat) + text-embedding-nomic-embed-text-v1.5 (768-dim) · zero marginal cost per call</text>
+
+  <!-- ============ RIGHT COLUMN ============ -->
+
+  <!-- Graph algorithms -->
+  <text x="971" y="178" font-size="13" font-weight="700" letter-spacing="1.5" fill="#A78BFA">GRAPH ALGORITHMS — graph_algorithms.py (MAGE)</text>
+  <rect x="971" y="188" width="925" height="80" rx="6" fill="#1E1B4B" stroke="#8B5CF6" stroke-width="1.5"/>
+  <text x="993" y="216" font-size="12.5" fill="#CBD5E1" font-family="Courier New, monospace">PageRank · Community Detection (Louvain fast / Leiden nightly)</text>
+  <text x="993" y="236" font-size="12.5" fill="#CBD5E1" font-family="Courier New, monospace">Betweenness Centrality · Degree Centrality · Weakly Connected Components</text>
+  <text x="993" y="256" font-size="11.5" fill="#94A3B8">ONLY file with MAGE CALL procedures · fast path after every meeting, full path nightly @ 02:00</text>
+
+  <!-- Memory layer -->
+  <text x="971" y="298" font-size="13" font-weight="700" letter-spacing="1.5" fill="#A78BFA">MEMORY LAYER — 4 modules, each owns its own node/edge types</text>
+  <rect x="971" y="308" width="925" height="150" rx="6" fill="#1E1B4B" stroke="#8B5CF6" stroke-width="1.5"/>
+  <g font-size="12">
+    <rect x="989" y="324" width="205" height="118" rx="5" fill="#2B2560" stroke="#7C3AED"/>
+    <text x="1091" y="344" text-anchor="middle" font-weight="700" fill="#DDD6FE">semantic_memory.py</text>
+    <text x="1091" y="364" text-anchor="middle" fill="#94A3B8">Fact, Preference</text>
+    <text x="1091" y="382" text-anchor="middle" fill="#94A3B8">KNOWS, INTERESTED_IN</text>
+    <text x="1091" y="400" text-anchor="middle" fill="#94A3B8">confidence 0.3→1.0</text>
+    <text x="1091" y="418" text-anchor="middle" fill="#94A3B8">5 Facts live now</text>
+
+    <rect x="1204" y="324" width="205" height="118" rx="5" fill="#2B2560" stroke="#7C3AED"/>
+    <text x="1306" y="344" text-anchor="middle" font-weight="700" fill="#DDD6FE">episodic_memory.py</text>
+    <text x="1306" y="364" text-anchor="middle" fill="#94A3B8">PRECEDED_BY, CAUSED_BY</text>
+    <text x="1306" y="382" text-anchor="middle" fill="#94A3B8">MemorySession</text>
+    <text x="1306" y="400" text-anchor="middle" fill="#94A3B8">relevance decay ×0.95/day</text>
+    <text x="1306" y="418" text-anchor="middle" fill="#94A3B8">floor 0.1</text>
+
+    <rect x="1419" y="324" width="205" height="118" rx="5" fill="#2B2560" stroke="#7C3AED"/>
+    <text x="1521" y="344" text-anchor="middle" font-weight="700" fill="#DDD6FE">procedural_memory.py</text>
+    <text x="1521" y="364" text-anchor="middle" fill="#94A3B8">Procedure, ProcedureStep</text>
+    <text x="1521" y="382" text-anchor="middle" fill="#94A3B8">6 seeded + inferred</text>
+    <text x="1521" y="400" text-anchor="middle" fill="#94A3B8">pattern match, no LLM</text>
+    <text x="1521" y="418" text-anchor="middle" fill="#94A3B8">1 meeting matched live</text>
+
+    <rect x="1634" y="324" width="245" height="118" rx="5" fill="#2B2560" stroke="#7C3AED"/>
+    <text x="1756" y="344" text-anchor="middle" font-weight="700" fill="#DDD6FE">vector_memory.py</text>
+    <text x="1756" y="364" text-anchor="middle" fill="#94A3B8">Meeting + Fact .embedding</text>
+    <text x="1756" y="382" text-anchor="middle" fill="#94A3B8">768-dim, cosine</text>
+    <text x="1756" y="400" text-anchor="middle" fill="#94A3B8">CALL vector_search.search()</text>
+    <text x="1756" y="418" text-anchor="middle" fill="#94A3B8">semantic, zero-keyword-overlap search</text>
+  </g>
+
+  <!-- Memory retrieval -->
+  <text x="971" y="490" font-size="13" font-weight="700" letter-spacing="1.5" fill="#A78BFA">MEMORY RETRIEVAL — memory_retrieval.py</text>
+  <rect x="971" y="500" width="925" height="60" rx="6" fill="#1E1B4B" stroke="#8B5CF6" stroke-width="1.5"/>
+  <text x="993" y="526" font-size="12.5" fill="#CBD5E1" font-family="Courier New, monospace">POST /graph/memory/query {"question": str} → entity extraction → graph context → LM Studio synthesis</text>
+  <text x="993" y="546" font-size="11.5" fill="#94A3B8">Query-time only — never called from graph_builder.py. Logs a MemorySession + ACCESSED edges every call.</text>
+
+  <!-- Jira read-back -->
+  <text x="971" y="598" font-size="13" font-weight="700" letter-spacing="1.5" fill="#A78BFA">JIRA READ-BACK — jira_agent.py (real, bidirectional)</text>
+  <rect x="971" y="608" width="925" height="70" rx="6" fill="#052E1B" stroke="#10B981" stroke-width="1.5"/>
+  <text x="993" y="634" font-size="12.5" fill="#CBD5E1">Airbyte Jira source → raw_jira_issues → jira_agent.py matches issue → ActionItem</text>
+  <text x="993" y="654" font-size="12.5" fill="#CBD5E1">SET a.jira_status, a.done — polled every 5 min, 37 issues synced and reconciled live</text>
+
+  <!-- Dev agent -->
+  <text x="971" y="706" font-size="13" font-weight="700" letter-spacing="1.5" fill="#A78BFA">AUTONOMOUS DEV AGENT — dev_agent/, separate Docker service :8002</text>
+  <rect x="971" y="716" width="925" height="180" rx="6" fill="#1E1B4B" stroke="#8B5CF6" stroke-width="1.5"/>
+  <text x="993" y="742" font-size="12" fill="#FCA5A5">Self-hosted — NOT an "Airbyte Agents" platform feature. Headless Claude Code, routed to LM Studio.</text>
+
+  <g font-size="11.5">
+    <rect x="993" y="756" width="168" height="52" rx="5" fill="#241040" stroke="#7C3AED"/>
+    <text x="1077" y="778" text-anchor="middle" font-weight="700" fill="#DDD6FE">BACKLOG</text>
+    <text x="1077" y="796" text-anchor="middle" fill="#94A3B8">autonomous triage</text>
+
+    <rect x="1176" y="756" width="168" height="52" rx="5" fill="#241040" stroke="#7C3AED"/>
+    <text x="1260" y="778" text-anchor="middle" font-weight="700" fill="#DDD6FE">TO DO → IN PROGRESS</text>
+    <text x="1260" y="796" text-anchor="middle" fill="#94A3B8">git worktree agent/&lt;KEY&gt;</text>
+
+    <rect x="1359" y="756" width="168" height="52" rx="5" fill="#241040" stroke="#7C3AED"/>
+    <text x="1443" y="778" text-anchor="middle" font-weight="700" fill="#DDD6FE">IN REVIEW</text>
+    <text x="1443" y="796" text-anchor="middle" fill="#94A3B8">PR verified via GitHub API</text>
+
+    <rect x="1542" y="756" width="337" height="52" rx="5" fill="#052E1B" stroke="#10B981"/>
+    <text x="1710" y="778" text-anchor="middle" font-weight="700" fill="#6EE7B7">MERGE — human checkpoint</text>
+    <text x="1710" y="796" text-anchor="middle" fill="#94A3B8">auto-merge deliberately NOT implemented</text>
+  </g>
+  <g stroke="#A78BFA" stroke-width="2" fill="none">
+    <line x1="1161" y1="782" x2="1176" y2="782" marker-end="url(#arrow-amber)"/>
+    <line x1="1344" y1="782" x2="1359" y2="782" marker-end="url(#arrow-amber)"/>
+    <line x1="1527" y1="782" x2="1542" y2="782" marker-end="url(#arrow-green)"/>
+  </g>
+
+  <text x="993" y="828" font-size="12" fill="#94A3B8">ANTHROPIC_API_KEY="" always — LM_STUDIO_ANTHROPIC_URL only, can never reach api.anthropic.com</text>
+  <text x="993" y="848" font-size="12" fill="#94A3B8">Failure path: ticket returns to TO DO (not stuck), Jira comment posted with the real error, dev_agent_runs.status='failed'</text>
+  <text x="993" y="868" font-size="12" fill="#94A3B8">Every scope, credential, and orchestrator bug in this component was found and fixed by live end-to-end testing —</text>
+  <text x="993" y="886" font-size="12" fill="#94A3B8">the one remaining blocker is LM Studio's loaded context length, a local resource setting, not application code.</text>
+
+  <!-- Bottom callout -->
+  <rect x="971" y="944" width="925" height="184" rx="6" fill="#04283B" stroke="#0EA5E9" stroke-width="1.5"/>
+  <text x="993" y="972" font-size="15" font-weight="700" fill="#7DD3FC">Why this is still the real Airbyte demo</text>
+  <g font-size="12.5" fill="#CBD5E1">
+    <text x="993" y="998">✓ Airbyte ELT still does 100% of the data replication — Gmail / Calendar / Jira → local Postgres</text>
+    <text x="993" y="1020">✓ Airbyte's Jira source closes the loop — reads ticket status back into the graph, not just writes</text>
+    <text x="993" y="1042">✓ Zero cloud LLM, zero cloud database — Airbyte Cloud is the one dependency kept, on purpose</text>
+    <text x="993" y="1064">✓ The graph computes (PageRank, communities), remembers (facts, decaying relevance), and recognizes</text>
+    <text x="1010" y="1084">workflows — not passive storage</text>
+    <text x="993" y="1106">✓ Two autonomous agents share one MCP surface: dev_agent writes code, memory_retrieval answers questions</text>
+  </g>
+</svg>
