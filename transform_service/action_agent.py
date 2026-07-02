@@ -16,6 +16,8 @@ import structlog
 from airbyte_agent_sdk.connectors.jira import JiraConnector
 from airbyte_agent_sdk.types import AirbyteAuthConfig
 
+from transform_service import memory_retrieval
+from transform_service.extractor import _get_client
 from transform_service.utils import with_retry
 
 log = structlog.get_logger()
@@ -108,3 +110,55 @@ async def has_agent_draft(jira: JiraConnector, issue_key: str) -> bool:
         if ACTION_AGENT_MARKER in _adf_to_text(body):
             return True
     return False
+
+
+_DRAFT_SYSTEM_PROMPT = """You draft deliverables for meeting action items.
+Given a Jira ticket and knowledge-graph context about the people, meetings,
+and facts involved, write the concrete deliverable the ticket asks for —
+the actual follow-up message, document summary, plan, or answer.
+Be specific: use names, dates, and facts from the context when available.
+If context is empty, draft from the ticket alone.
+Output ONLY the deliverable text. No preamble, no meta-commentary."""
+
+
+async def build_context(summary: str, description: str) -> tuple[str, int]:
+    """Graph context for a ticket via the sanctioned query-time interface.
+
+    Returns (context_text, nodes_count). Never raises — empty context on failure.
+    """
+    question = (
+        f"Context for this action item: {summary}. {description} "
+        "Who and what is involved, and what should the deliverable contain?"
+    )
+    try:
+        result = await memory_retrieval.full_memory_query(question)
+        return result.get("answer") or "", len(result.get("nodes_used") or [])
+    except Exception as exc:
+        log.warning("action_agent.context_failed", step="context", error=str(exc))
+        return "", 0
+
+
+async def draft_deliverable(
+    summary: str, description: str, context_text: str
+) -> Optional[str]:
+    """One LM Studio call producing the deliverable. None on any failure."""
+    client = _get_client()
+    user_prompt = (
+        f"Ticket: {summary}\n\nDetails: {description or '(none)'}\n\n"
+        f"Knowledge graph context:\n{context_text or '(none available)'}"
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model=os.environ["LM_STUDIO_MODEL"],
+            messages=[
+                {"role": "system", "content": _DRAFT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=800,
+        )
+        draft = (resp.choices[0].message.content or "").strip()
+        return draft or None
+    except Exception as exc:
+        log.warning("action_agent.draft_failed", step="draft", error=str(exc))
+        return None

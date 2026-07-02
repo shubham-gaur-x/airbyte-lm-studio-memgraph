@@ -122,3 +122,77 @@ async def test_has_agent_draft_false_when_no_marker():
         ]}},
     ])
     assert await action_agent.has_agent_draft(jira, "SCRUM-47") is False
+
+
+# ---------------------------------------------------------------------------
+# build_context / draft_deliverable
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_build_context_uses_full_memory_query():
+    fake = AsyncMock(return_value={
+        "answer": "Matteo hosts the migration meetings.",
+        "session_id": "s1",
+        "nodes_used": [{"id": "a"}, {"id": "b"}],
+        "context_summary": {"people_found": 1, "topics_found": 0},
+    })
+    with patch("transform_service.action_agent.memory_retrieval.full_memory_query", fake):
+        text, count = await action_agent.build_context("Follow up with Matteo", "reschedule")
+
+    assert "Matteo hosts" in text
+    assert count == 2
+    question = fake.call_args.args[0]
+    assert "Follow up with Matteo" in question
+
+
+@pytest.mark.anyio
+async def test_build_context_survives_memory_failure():
+    fake = AsyncMock(side_effect=RuntimeError("graph down"))
+    with patch("transform_service.action_agent.memory_retrieval.full_memory_query", fake):
+        text, count = await action_agent.build_context("t", "d")
+    assert text == ""
+    assert count == 0
+
+
+@pytest.mark.anyio
+async def test_draft_deliverable_returns_text():
+    msg = MagicMock()
+    msg.message.content = "Hi Matteo, could we move our sync to Thursday?"
+    resp = MagicMock()
+    resp.choices = [msg]
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=resp)
+    with (
+        patch("transform_service.action_agent._get_client", return_value=client),
+        patch.dict(os.environ, {"LM_STUDIO_MODEL": "test-model"}),
+    ):
+        draft = await action_agent.draft_deliverable("Follow up", "reschedule", "context")
+    assert "Thursday" in draft
+
+
+@pytest.mark.anyio
+async def test_draft_deliverable_returns_none_on_llm_failure():
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(side_effect=RuntimeError("LM down"))
+    with (
+        patch("transform_service.action_agent._get_client", return_value=client),
+        patch.dict(os.environ, {"LM_STUDIO_MODEL": "test-model"}),
+    ):
+        draft = await action_agent.draft_deliverable("t", "d", "c")
+    assert draft is None
+
+
+@pytest.mark.anyio
+async def test_draft_deliverable_returns_none_on_empty_answer():
+    msg = MagicMock()
+    msg.message.content = "   "
+    resp = MagicMock()
+    resp.choices = [msg]
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=resp)
+    with (
+        patch("transform_service.action_agent._get_client", return_value=client),
+        patch.dict(os.environ, {"LM_STUDIO_MODEL": "test-model"}),
+    ):
+        draft = await action_agent.draft_deliverable("t", "d", "c")
+    assert draft is None
