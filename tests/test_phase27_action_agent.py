@@ -143,6 +143,7 @@ async def test_build_context_uses_full_memory_query():
     assert count == 2
     question = fake.call_args.args[0]
     assert "Follow up with Matteo" in question
+    assert "reschedule" in question
 
 
 @pytest.mark.anyio
@@ -168,6 +169,10 @@ async def test_draft_deliverable_returns_text():
     ):
         draft = await action_agent.draft_deliverable("Follow up", "reschedule", "context")
     assert "Thursday" in draft
+    kwargs = client.chat.completions.create.call_args.kwargs
+    assert kwargs["model"] == "test-model"
+    assert kwargs["temperature"] == 0.0
+    assert kwargs["max_tokens"] == 800
 
 
 @pytest.mark.anyio
