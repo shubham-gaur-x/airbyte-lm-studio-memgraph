@@ -201,3 +201,147 @@ async def test_draft_deliverable_returns_none_on_empty_answer():
     ):
         draft = await action_agent.draft_deliverable("t", "d", "c")
     assert draft is None
+
+
+# ---------------------------------------------------------------------------
+# post_draft / transition_to_review / process_action_items
+# ---------------------------------------------------------------------------
+
+def _enabled_env():
+    return patch.dict(os.environ, {
+        "ACTION_AGENT_ENABLED": "true",
+        "AIRBYTE_AGENTS_CLIENT_ID": "cid",
+        "AIRBYTE_AGENTS_CLIENT_SECRET": "cs",
+        "AIRBYTE_AGENTS_CONNECTOR_ID": "conn",
+        "JIRA_PROJECT_KEY": "SCRUM",
+        "LM_STUDIO_MODEL": "test-model",
+    })
+
+
+def _patch_connector(jira):
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=jira)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return patch("transform_service.action_agent._make_connector", return_value=ctx)
+
+
+@pytest.mark.anyio
+async def test_post_draft_includes_marker_and_footer():
+    jira = _mock_jira()
+    await action_agent.post_draft(jira, "SCRUM-47", "The deliverable.", 4)
+    kwargs = jira.issue_comments.create.call_args.kwargs
+    assert kwargs["issue_id_or_key"] == "SCRUM-47"
+    body_text = action_agent._adf_to_text(kwargs["body"])
+    assert action_agent.ACTION_AGENT_MARKER in body_text
+    assert "The deliverable." in body_text
+    assert "4 nodes" in body_text
+
+
+@pytest.mark.anyio
+async def test_transition_to_review_picks_in_review_id():
+    jira = _mock_jira()
+    ok = await action_agent.transition_to_review(jira, "SCRUM-47")
+    assert ok is True
+    kwargs = jira.issue_transitions.create.call_args.kwargs
+    assert kwargs["issue_id_or_key"] == "SCRUM-47"
+    assert kwargs["transition"] == {"id": "31"}
+
+
+@pytest.mark.anyio
+async def test_transition_to_review_false_when_no_matching_transition():
+    jira = _mock_jira()
+    resp = MagicMock()
+    resp.data = [{"id": "41", "name": "Done", "to": {"name": "Done"}}]
+    jira.issue_transitions.list = AsyncMock(return_value=resp)
+    ok = await action_agent.transition_to_review(jira, "SCRUM-47")
+    assert ok is False
+    jira.issue_transitions.create.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_process_happy_path_drafts_comments_and_transitions():
+    jira = _mock_jira(search_records=[_search_record("SCRUM-47", "Follow up", None)])
+    with (
+        _enabled_env(),
+        _patch_connector(jira),
+        patch("transform_service.action_agent.build_context", AsyncMock(return_value=("ctx", 2))),
+        patch("transform_service.action_agent.draft_deliverable", AsyncMock(return_value="draft text")),
+    ):
+        result = await action_agent.process_action_items()
+
+    assert result["drafted"] == 1
+    assert result["failed"] == 0
+    jira.issue_comments.create.assert_called_once()
+    jira.issue_transitions.create.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_process_marker_present_repairs_transition_without_second_comment():
+    jira = _mock_jira(
+        search_records=[_search_record("SCRUM-47", "Follow up", None)],
+        comments=[{"body": {"type": "doc", "version": 1, "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": action_agent.ACTION_AGENT_MARKER}]},
+        ]}}],
+    )
+    with (
+        _enabled_env(),
+        _patch_connector(jira),
+        patch("transform_service.action_agent.draft_deliverable", AsyncMock()) as mock_draft,
+    ):
+        result = await action_agent.process_action_items()
+
+    assert result["repaired"] == 1
+    mock_draft.assert_not_called()
+    jira.issue_comments.create.assert_not_called()
+    jira.issue_transitions.create.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_process_llm_failure_writes_nothing():
+    jira = _mock_jira(search_records=[_search_record("SCRUM-47", "Follow up", None)])
+    with (
+        _enabled_env(),
+        _patch_connector(jira),
+        patch("transform_service.action_agent.build_context", AsyncMock(return_value=("", 0))),
+        patch("transform_service.action_agent.draft_deliverable", AsyncMock(return_value=None)),
+    ):
+        result = await action_agent.process_action_items()
+
+    assert result["failed"] == 1
+    assert result["drafted"] == 0
+    jira.issue_comments.create.assert_not_called()
+    jira.issue_transitions.create.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_process_one_bad_ticket_does_not_abort_batch():
+    jira = _mock_jira(search_records=[
+        _search_record("SCRUM-1", "bad", None),
+        _search_record("SCRUM-2", "good", None),
+    ])
+    drafts = AsyncMock(side_effect=[RuntimeError("boom"), "fine"])
+    with (
+        _enabled_env(),
+        _patch_connector(jira),
+        patch("transform_service.action_agent.build_context", AsyncMock(return_value=("", 0))),
+        patch("transform_service.action_agent.draft_deliverable", drafts),
+    ):
+        result = await action_agent.process_action_items()
+
+    assert result["failed"] == 1
+    assert result["drafted"] == 1
+
+
+@pytest.mark.anyio
+async def test_process_disabled_is_noop():
+    with patch.dict(os.environ, {"ACTION_AGENT_ENABLED": "false"}):
+        result = await action_agent.process_action_items()
+    assert result == {"skipped": "disabled"}
+
+
+@pytest.mark.anyio
+async def test_process_missing_credentials_is_noop():
+    env = {"ACTION_AGENT_ENABLED": "true", "AIRBYTE_AGENTS_CLIENT_ID": ""}
+    with patch.dict(os.environ, env):
+        result = await action_agent.process_action_items()
+    assert result == {"skipped": "no_credentials"}

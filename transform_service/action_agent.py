@@ -162,3 +162,107 @@ async def draft_deliverable(
     except Exception as exc:
         log.warning("action_agent.draft_failed", step="draft", error=str(exc))
         return None
+
+
+def _draft_comment_body(draft: str, nodes_count: int) -> dict:
+    """ADF document: marker paragraph, deliverable, provenance footer."""
+    footer = (
+        "— Drafted by action_agent (LM Studio, local) via Airbyte Agent SDK. "
+        f"Graph context: {nodes_count} nodes consulted."
+    )
+    paragraphs = [ACTION_AGENT_MARKER, draft, footer]
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+            for text in paragraphs
+        ],
+    }
+
+
+@with_retry(max_attempts=3, base_delay=2.0)
+async def post_draft(
+    jira: JiraConnector, issue_key: str, draft: str, nodes_count: int
+) -> None:
+    """Post the drafted deliverable as a marker-prefixed comment."""
+    await jira.issue_comments.create(
+        issue_id_or_key=issue_key,
+        body=_draft_comment_body(draft, nodes_count),
+    )
+    log.info("action_agent.draft_posted", step="comment", issue_key=issue_key)
+
+
+@with_retry(max_attempts=3, base_delay=2.0)
+async def transition_to_review(jira: JiraConnector, issue_key: str) -> bool:
+    """Move the ticket to In Review. False if no such transition exists."""
+    resp = await jira.issue_transitions.list(issue_id_or_key=issue_key)
+    transition_id: Optional[str] = None
+    for t in _records(resp):
+        target = ((t.get("to") or {}).get("name")) or t.get("name")
+        if target == _REVIEW_STATUS:
+            transition_id = t.get("id")
+            break
+    if transition_id is None:
+        log.warning(
+            "action_agent.no_review_transition", step="transition", issue_key=issue_key
+        )
+        return False
+    await jira.issue_transitions.create(
+        issue_id_or_key=issue_key, transition={"id": transition_id}
+    )
+    log.info("action_agent.transitioned", step="transition", issue_key=issue_key)
+    return True
+
+
+async def process_action_items() -> dict:
+    """Run the full pipeline once. Never raises.
+
+    Returns {"considered", "drafted", "repaired", "failed"} or {"skipped": reason}.
+    """
+    if os.environ.get("ACTION_AGENT_ENABLED", "false").lower() != "true":
+        return {"skipped": "disabled"}
+    if not os.environ.get("AIRBYTE_AGENTS_CLIENT_ID"):
+        log.warning("action_agent.no_credentials", step="init")
+        return {"skipped": "no_credentials"}
+
+    considered = drafted = repaired = failed = 0
+    try:
+        async with _make_connector() as jira:
+            tickets = await find_eligible_tickets(jira)
+            considered = len(tickets)
+            for ticket in tickets:
+                key = ticket["key"]
+                try:
+                    if await has_agent_draft(jira, key):
+                        # Comment landed last run but the transition failed.
+                        await transition_to_review(jira, key)
+                        repaired += 1
+                        continue
+                    context_text, nodes_count = await build_context(
+                        ticket["summary"], ticket["description"]
+                    )
+                    draft = await draft_deliverable(
+                        ticket["summary"], ticket["description"], context_text
+                    )
+                    if not draft:
+                        failed += 1
+                        continue
+                    await post_draft(jira, key, draft, nodes_count)
+                    await transition_to_review(jira, key)
+                    drafted += 1
+                except Exception as exc:
+                    failed += 1
+                    log.error(
+                        "action_agent.ticket_failed",
+                        step="pipeline", issue_key=key, error=str(exc),
+                    )
+    except Exception as exc:
+        log.error("action_agent.run_failed", step="run", error=str(exc))
+        return {"considered": considered, "drafted": drafted,
+                "repaired": repaired, "failed": failed}
+
+    summary = {"considered": considered, "drafted": drafted,
+               "repaired": repaired, "failed": failed}
+    log.info("action_agent.run_complete", step="run", **summary)
+    return summary
