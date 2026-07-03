@@ -256,6 +256,9 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
   issues `CALL vector_search.*` directly.
 - All LM Studio calls in memory modules reuse `extractor._get_client()` —
   no new `AsyncOpenAI` instances.
+- `action_agent.py` is the ONLY place the Airbyte Agent SDK (`airbyte-agent-sdk`)
+  appears. It is a sanctioned query-time consumer of `memory_retrieval` and must
+  never be called from `graph_builder.py`.
 
 ---
 
@@ -276,6 +279,9 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
 - DO NOT call `api.anthropic.com` from `dev_agent` — LM Studio only (no Anthropic API key)
 - DO NOT auto-merge PRs opened by the dev agent — human review is the one remaining checkpoint; do not jump ahead of it
 - DO NOT put Jira REST calls outside `jira_client.py` (applies to `dev_agent` and `transform_service` alike)
+- DO NOT use the Airbyte Agent SDK outside `action_agent.py`
+- DO NOT call `action_agent` functions from `graph_builder.py` (query-time only)
+- DO NOT let the action agent set any Jira status other than In Review
 - DO NOT let `dev_agent` default `is_engineering_task` to `True` when missing — fail safe toward NOT auto-implementing
 - DO NOT add MAGE CALL procedures outside `graph_algorithms.py`
 - DO NOT call `memory_retrieval` functions during ingestion (`graph_builder.py`)
@@ -315,6 +321,14 @@ JIRA_ISSUE_TYPE=Task
 
 # Airbyte webhook verification
 AIRBYTE_WEBHOOK_SECRET=
+
+# Action Agent (Airbyte Agents SDK — app.airbyte.ai; separate product from
+# the ELT API credentials above)
+ACTION_AGENT_ENABLED=true
+ACTION_AGENT_BATCH_SIZE=5
+AIRBYTE_AGENTS_CLIENT_ID=
+AIRBYTE_AGENTS_CLIENT_SECRET=
+AIRBYTE_AGENTS_CONNECTOR_ID=
 
 # Service
 PORT=8000

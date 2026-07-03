@@ -12,7 +12,7 @@ from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from transform_service import db, episodic_memory, graph_algorithms, memgraph_client, procedural_memory, semantic_memory, vector_memory
+from transform_service import action_agent, db, episodic_memory, graph_algorithms, memgraph_client, procedural_memory, semantic_memory, vector_memory
 from transform_service.memory_retrieval import full_memory_query, person_memory_profile
 from transform_service.digest import weekly_digest
 from transform_service.graph_builder import process_new_emails, process_new_events
@@ -93,6 +93,10 @@ async def lifespan(app: FastAPI):
         "cron", hour=2, minute=45,
         id="nightly_discover_procedures",
     )
+    scheduler.add_job(
+        action_agent.process_action_items,
+        "interval", minutes=5, id="action_agent_poll",
+    )
     scheduler.start()
     log.info("service.scheduler_started", interval_minutes=5)
 
@@ -138,6 +142,7 @@ async def webhook_airbyte(
     background_tasks.add_task(process_new_emails)
     background_tasks.add_task(process_new_events)
     background_tasks.add_task(process_jira_issues)
+    background_tasks.add_task(action_agent.process_action_items)
 
     log.info("webhook.queued", connection_id=payload.connection_id, job_id=payload.job_id)
     return {"status": "queued", "connection_id": payload.connection_id}
@@ -307,6 +312,11 @@ async def memory_sessions() -> Dict[str, Any]:
         )
         sessions_data = [dict(r) async for r in result]
     return {"sessions": sessions_data, "count": len(sessions_data)}
+
+
+@app.post("/agent/actions/run")
+async def agent_actions_run() -> Dict[str, Any]:
+    return await action_agent.process_action_items()
 
 
 @app.get("/graph/search/meetings")

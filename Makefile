@@ -1,4 +1,4 @@
-.PHONY: up down logs shell psql cypher test reset-db setup-memgraph smoke-test backfill tunnels setup-airbyte trigger dev-agent-logs dev-agent-trigger dev-agent-triage dev-agent-runs mcp-setup
+.PHONY: up down logs shell psql cypher test reset-db setup-memgraph smoke-test backfill tunnels setup-airbyte trigger action-agent-run dev-agent-logs dev-agent-trigger dev-agent-triage dev-agent-runs mcp-setup
 
 up:
 	docker compose up -d
@@ -51,6 +51,9 @@ trigger:
 	curl -s -X POST http://localhost:8000/webhook/airbyte \
 	  -H 'Content-Type: application/json' \
 	  -d '{"connection_id":"manual","status":"succeeded"}' | python3 -m json.tool
+
+action-agent-run:
+	curl -s -X POST http://localhost:8000/agent/actions/run | python3 -m json.tool
 
 dev-agent-logs:
 	docker compose logs -f dev_agent
