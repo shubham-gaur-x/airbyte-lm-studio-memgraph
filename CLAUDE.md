@@ -256,9 +256,12 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
   issues `CALL vector_search.*` directly.
 - All LM Studio calls in memory modules reuse `extractor._get_client()` —
   no new `AsyncOpenAI` instances.
-- `action_agent.py` is the ONLY place the Airbyte Agent SDK (`airbyte-agent-sdk`)
-  appears. It is a sanctioned query-time consumer of `memory_retrieval` and must
-  never be called from `graph_builder.py`.
+- `action_agent.py` is the ONLY application module allowed to use the Airbyte
+  Agent SDK (`airbyte-agent-sdk`). It is a sanctioned query-time consumer of
+  `memory_retrieval` and must never be called from `graph_builder.py`. One-off
+  setup/probe scripts under `scripts/` (`test_action_agent_sdk.py`,
+  `create_agents_jira_connector.py`) may also import the SDK — they aren't
+  part of the running service.
 
 ---
 
