@@ -12,6 +12,7 @@ import os
 from typing import Any, Optional
 
 import structlog
+from pydantic import BaseModel
 
 from airbyte_agent_sdk.connectors.jira import JiraConnector
 from airbyte_agent_sdk.types import AirbyteAuthConfig
@@ -55,11 +56,19 @@ def _records(resp: Any) -> list:
 
 
 def _adf_to_text(node: Any) -> str:
-    """Flatten Atlassian Document Format to plain text."""
+    """Flatten Atlassian Document Format to plain text.
+
+    ADF shows up two ways here: plain dicts (our own comment bodies, built in
+    _draft_comment_body) and SDK Pydantic models (comment bodies read back
+    from the API, e.g. IssueCommentBody). Normalize the latter via
+    model_dump() so one recursive walk handles both.
+    """
     if node is None:
         return ""
     if isinstance(node, str):
         return node
+    if isinstance(node, BaseModel):
+        node = node.model_dump()
     parts: list[str] = []
     if isinstance(node, dict):
         text = node.get("text")
@@ -91,11 +100,15 @@ async def find_eligible_tickets(jira: JiraConnector) -> list[dict]:
     )
     tickets: list[dict] = []
     for rec in _records(resp)[:batch]:
-        fields = rec.get("fields") or {}
+        # rec is a real SDK Issue model — attribute access, not dict .get().
+        # description/labels are dynamic fields (IssueFields allows extra),
+        # so getattr with a default is required even though summary/status
+        # are declared model fields.
+        fields = rec.fields
         tickets.append({
-            "key": rec.get("key", ""),
-            "summary": fields.get("summary") or "",
-            "description": _adf_to_text(fields.get("description")),
+            "key": rec.key or "",
+            "summary": (getattr(fields, "summary", "") or "") if fields else "",
+            "description": _adf_to_text(getattr(fields, "description", None) if fields else None),
         })
     log.info("action_agent.eligible", step="find", count=len(tickets))
     return tickets
@@ -106,7 +119,7 @@ async def has_agent_draft(jira: JiraConnector, issue_key: str) -> bool:
     """True if a previous run already posted the marker comment."""
     resp = await jira.issue_comments.list(issue_id_or_key=issue_key)
     for comment in _records(resp):
-        body = comment.get("body") if isinstance(comment, dict) else None
+        body = getattr(comment, "body", None)
         if ACTION_AGENT_MARKER in _adf_to_text(body):
             return True
     return False
@@ -199,9 +212,10 @@ async def transition_to_review(jira: JiraConnector, issue_key: str) -> bool:
     resp = await jira.issue_transitions.list(issue_id_or_key=issue_key)
     transition_id: Optional[str] = None
     for t in _records(resp):
-        target = ((t.get("to") or {}).get("name")) or t.get("name")
+        to = getattr(t, "to", None)
+        target = getattr(to, "name", None) if to else getattr(t, "name", None)
         if target == _REVIEW_STATUS:
-            transition_id = t.get("id")
+            transition_id = getattr(t, "id", None)
             break
     if transition_id is None:
         log.warning(

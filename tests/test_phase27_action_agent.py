@@ -1,10 +1,27 @@
-"""Phase 27: Tests for transform_service/action_agent.py."""
+"""Phase 27: Tests for transform_service/action_agent.py.
+
+Fixtures use real airbyte_agent_sdk Pydantic model instances (not dicts or
+bare MagicMocks) for anything standing in for an SDK response record. A live
+end-to-end run found that dict-shaped fixtures let `.get()`-based code pass
+every test while failing for real, because both dicts and MagicMock silently
+support `.get()` — real SDK models (Pydantic, extra="allow") do not.
+"""
 from __future__ import annotations
 
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from airbyte_agent_sdk.connectors.jira.models import (
+    Issue,
+    IssueComment,
+    IssueCommentBody,
+    IssueFields,
+    IssueFieldsStatus,
+    IssueTransition,
+    IssueTransitionTo,
+)
 
 from transform_service import action_agent
 
@@ -14,7 +31,27 @@ from transform_service import action_agent
 # ---------------------------------------------------------------------------
 
 def _search_record(key: str, summary: str, description=None):
-    return {"key": key, "fields": {"summary": summary, "description": description}}
+    fields = IssueFields(
+        summary=summary,
+        status=IssueFieldsStatus(name="To Do"),
+    )
+    # description/labels are dynamic (extra="allow"), same as the live API
+    fields.description = description
+    fields.labels = ["meeting-action-item"]
+    return Issue(id=key, key=key, fields=fields)
+
+
+def _comment(body_text: str):
+    body = IssueCommentBody(
+        type_="doc",
+        version=1,
+        content=[{"type": "paragraph", "content": [{"type": "text", "text": body_text}]}],
+    )
+    return IssueComment(id="1", body=body)
+
+
+def _transition(tid: str, name: str, to_name: str):
+    return IssueTransition(id=tid, name=name, to=IssueTransitionTo(name=to_name))
 
 
 def _mock_jira(search_records=None, comments=None):
@@ -28,8 +65,8 @@ def _mock_jira(search_records=None, comments=None):
     jira.issue_comments.create = AsyncMock()
     transitions_resp = MagicMock()
     transitions_resp.data = [
-        {"id": "21", "name": "In Progress", "to": {"name": "In Progress"}},
-        {"id": "31", "name": "In Review", "to": {"name": "In Review"}},
+        _transition("21", "In Progress", "In Progress"),
+        _transition("31", "In Review", "In Review"),
     ]
     jira.issue_transitions.list = AsyncMock(return_value=transitions_resp)
     jira.issue_transitions.create = AsyncMock()
@@ -106,21 +143,13 @@ async def test_find_eligible_tickets_respects_batch_size():
 
 @pytest.mark.anyio
 async def test_has_agent_draft_true_when_marker_comment_exists():
-    jira = _mock_jira(comments=[
-        {"body": {"type": "doc", "version": 1, "content": [
-            {"type": "paragraph", "content": [{"type": "text", "text": action_agent.ACTION_AGENT_MARKER}]},
-        ]}},
-    ])
+    jira = _mock_jira(comments=[_comment(action_agent.ACTION_AGENT_MARKER)])
     assert await action_agent.has_agent_draft(jira, "SCRUM-47") is True
 
 
 @pytest.mark.anyio
 async def test_has_agent_draft_false_when_no_marker():
-    jira = _mock_jira(comments=[
-        {"body": {"type": "doc", "version": 1, "content": [
-            {"type": "paragraph", "content": [{"type": "text", "text": "human comment"}]},
-        ]}},
-    ])
+    jira = _mock_jira(comments=[_comment("human comment")])
     assert await action_agent.has_agent_draft(jira, "SCRUM-47") is False
 
 
@@ -251,7 +280,7 @@ async def test_transition_to_review_picks_in_review_id():
 async def test_transition_to_review_false_when_no_matching_transition():
     jira = _mock_jira()
     resp = MagicMock()
-    resp.data = [{"id": "41", "name": "Done", "to": {"name": "Done"}}]
+    resp.data = [_transition("41", "Done", "Done")]
     jira.issue_transitions.list = AsyncMock(return_value=resp)
     ok = await action_agent.transition_to_review(jira, "SCRUM-47")
     assert ok is False
@@ -279,9 +308,7 @@ async def test_process_happy_path_drafts_comments_and_transitions():
 async def test_process_marker_present_repairs_transition_without_second_comment():
     jira = _mock_jira(
         search_records=[_search_record("SCRUM-47", "Follow up", None)],
-        comments=[{"body": {"type": "doc", "version": 1, "content": [
-            {"type": "paragraph", "content": [{"type": "text", "text": action_agent.ACTION_AGENT_MARKER}]},
-        ]}}],
+        comments=[_comment(action_agent.ACTION_AGENT_MARKER)],
     )
     with (
         _enabled_env(),
