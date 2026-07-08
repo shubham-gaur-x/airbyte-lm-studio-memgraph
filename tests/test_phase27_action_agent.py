@@ -305,6 +305,29 @@ async def test_process_happy_path_drafts_comments_and_transitions():
 
 
 @pytest.mark.anyio
+async def test_process_happy_path_counts_failed_when_no_review_transition():
+    jira = _mock_jira(search_records=[_search_record("SCRUM-47", "Follow up", None)])
+    no_review_resp = MagicMock()
+    no_review_resp.data = [_transition("41", "Done", "Done")]
+    jira.issue_transitions.list = AsyncMock(return_value=no_review_resp)
+    with (
+        _enabled_env(),
+        _patch_connector(jira),
+        patch("transform_service.action_agent.build_context", AsyncMock(return_value=("ctx", 2))),
+        patch("transform_service.action_agent.draft_deliverable", AsyncMock(return_value="draft text")),
+    ):
+        result = await action_agent.process_action_items()
+
+    # Comment landed, but with no path to In Review the ticket isn't done —
+    # counting it drafted would hide that from the operator, and the next
+    # poll's marker guard will retry just the transition.
+    assert result["drafted"] == 0
+    assert result["failed"] == 1
+    jira.issue_comments.create.assert_called_once()
+    jira.issue_transitions.create.assert_not_called()
+
+
+@pytest.mark.anyio
 async def test_process_marker_present_repairs_transition_without_second_comment():
     jira = _mock_jira(
         search_records=[_search_record("SCRUM-47", "Follow up", None)],
@@ -321,6 +344,29 @@ async def test_process_marker_present_repairs_transition_without_second_comment(
     mock_draft.assert_not_called()
     jira.issue_comments.create.assert_not_called()
     jira.issue_transitions.create.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_process_repair_counts_failed_when_transition_still_unavailable():
+    jira = _mock_jira(
+        search_records=[_search_record("SCRUM-47", "Follow up", None)],
+        comments=[_comment(action_agent.ACTION_AGENT_MARKER)],
+    )
+    no_review_resp = MagicMock()
+    no_review_resp.data = [_transition("41", "Done", "Done")]
+    jira.issue_transitions.list = AsyncMock(return_value=no_review_resp)
+    with (
+        _enabled_env(),
+        _patch_connector(jira),
+        patch("transform_service.action_agent.draft_deliverable", AsyncMock()) as mock_draft,
+    ):
+        result = await action_agent.process_action_items()
+
+    assert result["repaired"] == 0
+    assert result["failed"] == 1
+    mock_draft.assert_not_called()
+    jira.issue_comments.create.assert_not_called()
+    jira.issue_transitions.create.assert_not_called()
 
 
 @pytest.mark.anyio

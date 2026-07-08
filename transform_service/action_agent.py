@@ -250,8 +250,13 @@ async def process_action_items() -> dict:
                 try:
                     if await has_agent_draft(jira, key):
                         # Comment landed last run but the transition failed.
-                        await transition_to_review(jira, key)
-                        repaired += 1
+                        # A repeat failure here counts as failed, not repaired
+                        # — the marker stays present, so the next poll retries
+                        # only the transition, never a second comment.
+                        if await transition_to_review(jira, key):
+                            repaired += 1
+                        else:
+                            failed += 1
                         continue
                     context_text, nodes_count = await build_context(
                         ticket["summary"], ticket["description"]
@@ -263,8 +268,13 @@ async def process_action_items() -> dict:
                         failed += 1
                         continue
                     await post_draft(jira, key, draft, nodes_count)
-                    await transition_to_review(jira, key)
-                    drafted += 1
+                    # Same rule: comment posted but no transition available yet
+                    # is not a completed drafted ticket — count it failed so
+                    # the next poll's marker guard retries the transition only.
+                    if await transition_to_review(jira, key):
+                        drafted += 1
+                    else:
+                        failed += 1
                 except Exception as exc:
                     failed += 1
                     log.error(
