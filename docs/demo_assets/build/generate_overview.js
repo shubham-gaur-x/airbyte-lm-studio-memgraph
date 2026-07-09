@@ -94,7 +94,7 @@ async function main() {
     });
   }
 
-  const TOTAL = 21;
+  const TOTAL = 27;
 
   // ===========================================================================
   // 1 — Title
@@ -138,7 +138,7 @@ async function main() {
       "The graph doesn't just store meetings — it computes influence (PageRank), remembers durable facts, decays stale context, recognizes workflows, and answers natural-language questions, grounded in real data",
     ], 0.5, 1.5, 9, 1.7, { fontSize: 11, lineSpacing: 1.4 });
 
-    const stats = [["4", "iterations to get here", C.blue], ["$0", "marginal cost / meeting", C.green], ["99", "automated tests", C.purple], ["12", "Docker/agent services", C.amber]];
+    const stats = [["4", "iterations to get here", C.blue], ["$0", "marginal cost / meeting", C.green], ["126", "automated tests", C.purple], ["12", "Docker/agent services", C.amber]];
     let sx = 0.5;
     const sw = 2.2;
     stats.forEach(([num, label, color]) => {
@@ -264,7 +264,7 @@ async function main() {
   {
     const s = baseSlide();
     s.addImage({
-      path: path.join(ASSETS, "architecture_v4.png"),
+      path: path.join(ASSETS, "architecture_v4.jpg"),
       x: 0.12, y: 0.08, w: 9.76, h: 5.1,
       sizing: { type: "contain", w: 9.76, h: 5.1 },
     });
@@ -442,7 +442,55 @@ async function main() {
   }
 
   // ===========================================================================
-  // 12 — Memory Modules, the math
+  // 12 — Graph Algorithms, LIVE RESULTS (NEW)
+  // ===========================================================================
+  {
+    const s = baseSlide();
+    kicker(s, "Not a mockup — real output, this session");
+    title(s, "Graph Algorithms — Live Results");
+
+    card(s, 0.5, 1.4, 4.4, 3.8, { fill: C.bgDeep, line: C.teal });
+    s.addText("PageRank leaderboard", { x: 0.68, y: 1.52, w: 4, h: 0.28, fontSize: 11, bold: true, color: C.teal, fontFace: "Calibri", margin: 0 });
+    codeBlock(s, [
+      "person            pagerank  community",
+      "Femi Oduwole      0.0047    11",
+      "Matteo Vaiente    0.0045    4",
+      "Matteo            0.0045    4",
+      "Femi Oduwole      0.0037    4",
+      "Mark Johnston     0.0037    4",
+      "Phil Loranger     0.0037    4",
+      "Jacob Barka       0.0037    11",
+    ], 0.68, 1.88, 4.05, 2.0, { fontSize: 8.4 });
+    s.addText("MATCH (p:Person) WHERE p.pagerank_score IS NOT NULL\nRETURN p.name, p.pagerank_score ORDER BY ... DESC", {
+      x: 0.68, y: 4.0, w: 4.05, h: 0.5, fontSize: 7.6, italic: true, color: C.muted, fontFace: "Courier New", margin: 0,
+    });
+    s.addText("Femi Oduwole appears twice — same person, two attendee records from different meetings, not deduplicated on name. Real data, real rough edge.", {
+      x: 0.68, y: 4.55, w: 4.05, h: 0.55, fontSize: 7.8, color: C.muted, fontFace: "Calibri", margin: 0,
+    });
+
+    card(s, 5.1, 1.4, 4.4, 3.8, { fill: C.bgDeep, line: C.purple });
+    s.addText("Community detection", { x: 5.28, y: 1.52, w: 4, h: 0.28, fontSize: 11, bold: true, color: C.purple, fontFace: "Calibri", margin: 0 });
+    codeBlock(s, [
+      "community  members",
+      "5          42",
+      "4          22",
+      "11         17",
+      "-1         11",
+      "9          9",
+      "6          6",
+    ], 5.28, 1.88, 4.05, 1.75, { fontSize: 8.4 });
+    s.addText("Real clusters, not one blob or all-singletons — Louvain found actual structure in 74 real meetings.", {
+      x: 5.28, y: 3.75, w: 4.05, h: 0.5, fontSize: 8, italic: true, color: C.muted, fontFace: "Calibri", margin: 0,
+    });
+    s.addText("This ran live in this session via graph_algorithms.run_fast_algorithms() — the exact function graph_builder.py calls after every real meeting.", {
+      x: 5.28, y: 4.3, w: 4.05, h: 0.75, fontSize: 8, color: C.muted, fontFace: "Calibri", margin: 0,
+    });
+
+    footer(s, 12, TOTAL);
+  }
+
+  // ===========================================================================
+  // 13 — Memory Modules, the math
   // ===========================================================================
   {
     const s = baseSlide();
@@ -487,7 +535,7 @@ async function main() {
       x: 5.28, y: 4.35, w: 4.05, h: 0.5, fontSize: 8.3, color: C.muted, fontFace: "Calibri", margin: 0,
     });
 
-    footer(s, 12, TOTAL);
+    footer(s, 13, TOTAL);
   }
 
   // ===========================================================================
@@ -522,7 +570,7 @@ async function main() {
       "backfill_embeddings() — one-off, for pre-existing data",
     ], 5.73, 1.88, 3.6, 3.3, { fontSize: 8.6, lineSpacing: 1.32 });
 
-    footer(s, 13, TOTAL);
+    footer(s, 14, TOTAL);
   }
 
   // ===========================================================================
@@ -564,32 +612,188 @@ async function main() {
       "Auto-merge deliberately NOT implemented — human review is the one remaining checkpoint",
     ], 0.68, 4.08, 8.65, 1.0, { fontSize: 8.6, fontFace: "Courier New", lineSpacing: 1.28 });
 
-    footer(s, 14, TOTAL);
+    footer(s, 15, TOTAL);
   }
 
   // ===========================================================================
-  // 15 — Bidirectional Jira + MCP
+  // 16 — Action Agent, what it solves (NEW)
   // ===========================================================================
   {
     const s = baseSlide();
-    kicker(s, "jira_pusher.py · jira_agent.py · MCP servers");
+    kicker(s, "The gap dev_agent doesn't cover");
+    title(s, "Action Agent — What It Solves");
+
+    bulletList(s, [
+      "dev_agent only works engineering tickets — real code changes, a real PR. Every meeting also produces action items that aren't code: \"follow up with Matteo\", \"share the webhook docs\", \"review the budget adjustments\"",
+      "Those got pushed to Jira by jira_pusher.py, labeled meeting-action-item, and then — nothing. dev_agent correctly skips them. Nobody else was working them.",
+      "action_agent.py closes that gap: it picks up exactly the tickets dev_agent is designed to ignore, drafts the real deliverable grounded in graph context, and hands it to a human to approve",
+    ], 0.5, 1.5, 9, 2.0, { fontSize: 12, lineSpacing: 1.5 });
+
+    card(s, 0.5, 3.65, 9, 1.35, { fill: C.bgDeep, line: C.purple });
+    s.addText("Two agents, zero overlap", { x: 0.68, y: 3.78, w: 8.6, h: 0.28, fontSize: 11, bold: true, color: C.purple, fontFace: "Calibri", margin: 0 });
+    codeBlock(s, [
+      "dev_agent        engineering tickets   -> git worktree, PR, IN REVIEW",
+      "action_agent     everything else       -> drafted comment, IN REVIEW",
+    ], 0.68, 4.1, 8.65, 0.75, { fontSize: 9.5 });
+
+    footer(s, 16, TOTAL);
+  }
+
+  // ===========================================================================
+  // 17 — Action Agent, the pipeline (NEW)
+  // ===========================================================================
+  {
+    const s = baseSlide();
+    kicker(s, "transform_service/action_agent.py — the only file using airbyte-agent-sdk");
+    title(s, "Action Agent — Pipeline");
+
+    const steps = [
+      ["FIND", "To Do +\nmeeting-action-item"],
+      ["GUARD", "marker comment?\nskip to transition"],
+      ["CONTEXT", "memory_retrieval\n.full_memory_query()"],
+      ["DRAFT", "LM Studio\n(local, temp=0.0)"],
+      ["COMMENT", "post_draft()\nADF + marker"],
+      ["TRANSITION", "To Do ->\nIn Review"],
+    ];
+    let sx = 0.5;
+    const sw = 1.42;
+    steps.forEach(([h, d], i) => {
+      s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: sx, y: 1.5, w: sw, h: 1.15, rectRadius: 0.05, fill: { color: C.card }, line: { color: C.purple, width: 1.1 } });
+      s.addText(h, { x: sx, y: 1.6, w: sw, h: 0.28, fontSize: 9, bold: true, color: C.purple, align: "center", fontFace: "Calibri", margin: 0 });
+      s.addText(d, { x: sx + 0.05, y: 1.92, w: sw - 0.1, h: 0.65, fontSize: 7.2, color: C.muted, align: "center", fontFace: "Courier New", margin: 0 });
+      if (i < 5) s.addShape(pres.shapes.RIGHT_ARROW, { x: sx + sw + 0.01, y: 1.98, w: 0.1, h: 0.14, fill: { color: C.muted } });
+      sx += sw + 0.11;
+    });
+
+    card(s, 0.5, 2.85, 9, 1.05, { fill: C.bgDeep, line: C.green });
+    s.addText("Airbyte Agents SDK is a tool layer, not a hosted brain", { x: 0.68, y: 2.96, w: 8.6, h: 0.26, fontSize: 10.5, bold: true, color: C.green, fontFace: "Calibri", margin: 0 });
+    s.addText("BYO-LLM by design — the SDK gives typed Jira operations (search, comment, transition); LM Studio does 100% of the reasoning. No exception to the no-cloud-LLM rule.", {
+      x: 0.68, y: 3.24, w: 8.6, h: 0.55, fontSize: 8.8, color: C.lighter, fontFace: "Calibri", margin: 0,
+    });
+
+    card(s, 0.5, 4.05, 9, 1.05, { fill: C.bgDeep });
+    bulletList(s, [
+      "Idempotency: ACTION_AGENT_MARKER in the comment body gates retries — a partial failure (comment posted, transition didn't) re-enters at TRANSITION, never double-drafts",
+      "AIRBYTE_AGENTS_CLIENT_ID/SECRET are deliberately separate from AIRBYTE_CLIENT_ID/SECRET (Airbyte Cloud ELT) — different product, credentials never conflated",
+    ], 0.68, 4.18, 8.65, 0.9, { fontSize: 8.6, lineSpacing: 1.3 });
+
+    footer(s, 17, TOTAL);
+  }
+
+  // ===========================================================================
+  // 18 — Built with rigor: the bug live testing found (NEW)
+  // ===========================================================================
+  {
+    const s = baseSlide();
+    kicker(s, "Task-level review approved every task. Live testing didn't lie.");
+    title(s, "Built With Rigor, Not Just Built");
+
+    const steps = [
+      ["6 tasks, 6 reviews", "Every task passed spec + quality review against mocked tests", C.blue],
+      ["Live run: instant failure", "'Issue' object has no attribute 'get' — first real Jira call, first try", C.red],
+      ["Root cause found", "The SDK returns typed Pydantic models. Dicts AND MagicMock both silently support .get() — every mock hid the exact mismatch", C.amber],
+      ["Fixtures rebuilt, fixed for real", "Tests now construct real SDK model instances. 126/126 green, then a live run against the real board succeeded", C.green],
+    ];
+    let y = 1.42;
+    steps.forEach(([h, d, color]) => {
+      s.addShape(pres.shapes.OVAL, { x: 0.5, y: y + 0.04, w: 0.15, h: 0.15, fill: { color } });
+      s.addText(h, { x: 0.8, y: y - 0.06, w: 8.3, h: 0.28, fontSize: 11.5, bold: true, color: C.white, fontFace: "Calibri", margin: 0 });
+      s.addText(d, { x: 0.8, y: y + 0.22, w: 8.3, h: 0.4, fontSize: 8.8, color: C.muted, fontFace: "Calibri", margin: 0 });
+      y += 0.66;
+    });
+
+    codeBlock(s, [
+      "AttributeError: 'Issue' object has no attribute 'get'",
+      "  # find_eligible_tickets: rec.get(\"fields\")   -> rec.fields",
+      "  # has_agent_draft:      comment.get(\"body\")  -> getattr(comment, \"body\", None)",
+      "  # transition_to_review: t.get(\"to\")          -> getattr(t, \"to\", None)",
+    ], 0.5, 4.18, 9, 1.0, { fontSize: 7.6 });
+
+    footer(s, 18, TOTAL);
+  }
+
+  // ===========================================================================
+  // 19 — Live Proof: Jira (NEW)
+  // ===========================================================================
+  {
+    const s = baseSlide();
+    kicker(s, "Real ticket, real board — shubhamgaur1.atlassian.net");
+    title(s, "Live Proof — Jira");
+
+    card(s, 0.5, 1.35, 5.15, 3.75, { fill: "FFFFFF", line: "E2E8F0" });
+    s.addImage({
+      path: path.join(ASSETS, "jira_scrum47_action_agent.jpg"),
+      x: 0.6, y: 1.44, w: 4.95, h: 3.57, sizing: { type: "contain", w: 4.95, h: 3.57 },
+    });
+
+    card(s, 5.85, 1.35, 3.65, 1.85, { fill: C.bgDeep, line: C.green });
+    s.addText("SCRUM-47 — before -> after", { x: 6.03, y: 1.47, w: 3.3, h: 0.26, fontSize: 10.5, bold: true, color: C.green, fontFace: "Calibri", margin: 0 });
+    codeBlock(s, [
+      "To Do  ->  In Review",
+      "labels: meeting-action-item",
+      "+1 comment: [action-agent draft]",
+    ], 6.03, 1.78, 3.3, 1.3, { fontSize: 8.4 });
+
+    card(s, 5.85, 3.32, 3.65, 1.78, { fill: C.bgDeep, line: C.blue });
+    s.addText("What the agent actually wrote", { x: 6.03, y: 3.44, w: 3.3, h: 0.26, fontSize: 10.5, bold: true, color: C.blue, fontFace: "Calibri", margin: 0 });
+    s.addText("“Reach out to Sarah Chen and David Lee who expressed interest in advanced features during the workshop on 2024-04-14.”", {
+      x: 6.03, y: 3.74, w: 3.3, h: 0.95, fontSize: 8.6, italic: true, color: C.lighter, fontFace: "Calibri", margin: 0, lineSpacingMultiple: 1.25,
+    });
+    s.addText("Real names, real date — from 2 graph nodes consulted, not generic filler", {
+      x: 6.03, y: 4.72, w: 3.3, h: 0.35, fontSize: 7.6, color: C.muted, fontFace: "Calibri", margin: 0,
+    });
+
+    footer(s, 19, TOTAL);
+  }
+
+  // ===========================================================================
+  // 20 — Live Proof: Airbyte Agents dashboard (NEW)
+  // ===========================================================================
+  {
+    const s = baseSlide();
+    kicker(s, "app.airbyte.ai — org Onix, Tool Calls (not Sessions)");
+    title(s, "Live Proof — Airbyte Agents Dashboard");
+
+    card(s, 0.5, 1.35, 5.6, 3.75, { fill: "FFFFFF", line: "E2E8F0" });
+    s.addImage({
+      path: path.join(ASSETS, "airbyte_agents_tool_calls.jpg"),
+      x: 0.6, y: 1.44, w: 5.4, h: 3.57, sizing: { type: "contain", w: 5.4, h: 3.57 },
+    });
+
+    card(s, 6.3, 1.35, 3.2, 3.75, { fill: C.bgDeep, line: C.purple });
+    s.addText("Every SDK call, logged by Airbyte", { x: 6.48, y: 1.47, w: 2.85, h: 0.5, fontSize: 10.5, bold: true, color: C.purple, fontFace: "Calibri", margin: 0 });
+    codeBlock(s, [
+      "issues / api_search",
+      "issue_comments / list",
+      "issue_comments / create",
+      "issue_transitions / list",
+      "issue_transitions / create",
+    ], 6.48, 2.0, 2.85, 1.55, { fontSize: 8 });
+    s.addText("“Sessions” tracks Airbyte's own web-chat UI — a different feature. “Tool Calls” is what our SDK code triggers, and it's exactly what we wanted to see.", {
+      x: 6.48, y: 3.65, w: 2.85, h: 1.3, fontSize: 8.2, color: C.lighter, fontFace: "Calibri", margin: 0, lineSpacingMultiple: 1.3,
+    });
+
+    footer(s, 20, TOTAL);
+  }
+
+  // ===========================================================================
+  // 21 — Bidirectional Jira + MCP
+  // ===========================================================================
+  {
+    const s = baseSlide();
+    kicker(s, "jira_pusher.py · jira_agent.py · action_agent.py · MCP servers");
     title(s, "Bidirectional Jira, One-Turn Agent Access");
 
     card(s, 0.5, 1.4, 4.4, 3.55, { fill: C.bgDeep, line: C.purple });
-    s.addText("Jira loop", { x: 0.68, y: 1.52, w: 3.5, h: 0.28, fontSize: 11, bold: true, color: C.purple, fontFace: "Calibri", margin: 0 });
+    s.addText("Jira loop — three components now", { x: 0.68, y: 1.52, w: 4.0, h: 0.28, fontSize: 11, bold: true, color: C.purple, fontFace: "Calibri", margin: 0 });
     codeBlock(s, [
-      "jira_pusher.py",
-      "  ActionItem -> POST /rest/api/3/issue",
-      "",
-      "Airbyte Jira source",
-      "  -> raw_jira_issues (Postgres)",
-      "",
-      "jira_agent.py",
-      "  matches issue -> ActionItem node",
-      "  SET a.jira_status, a.done",
-    ], 0.68, 1.88, 4.05, 2.4, { fontSize: 8.2, color: C.light, line: "5C67F2" });
-    s.addText("All Jira REST calls live in jira_client.py — no exceptions", {
-      x: 0.68, y: 4.35, w: 4.05, h: 0.5, fontSize: 8, italic: true, color: C.muted, fontFace: "Calibri", margin: 0,
+      "jira_pusher.py    ActionItem -> Jira issue",
+      "Airbyte Jira src  -> raw_jira_issues (Postgres)",
+      "jira_agent.py     issue -> ActionItem.jira_status",
+      "action_agent.py   drafts + resolves the rest",
+    ], 0.68, 1.88, 4.05, 1.5, { fontSize: 8.2, color: C.light, line: "5C67F2" });
+    s.addText("All Jira REST calls live in jira_client.py — no exceptions. action_agent.py is the only one using the Airbyte Agent SDK instead.", {
+      x: 0.68, y: 3.5, w: 4.05, h: 1.3, fontSize: 8, italic: true, color: C.muted, fontFace: "Calibri", margin: 0, lineSpacingMultiple: 1.3,
     });
 
     card(s, 5.1, 1.4, 4.4, 3.55, { fill: C.bgDeep, line: C.blue });
@@ -608,11 +812,11 @@ async function main() {
       x: 5.28, y: 4.35, w: 4.05, h: 0.5, fontSize: 8, italic: true, color: C.muted, fontFace: "Calibri", margin: 0,
     });
 
-    footer(s, 15, TOTAL);
+    footer(s, 21, TOTAL);
   }
 
   // ===========================================================================
-  // 16 — Module Boundaries & Absolute Rules
+  // 22 — Module Boundaries & Absolute Rules
   // ===========================================================================
   {
     const s = baseSlide();
@@ -624,6 +828,8 @@ async function main() {
       "memgraph_client.py is the ONLY file with Cypher (plus the memory modules for their own node types)",
       "db.py is the ONLY file with SQL",
       "jira_client.py is the ONLY file with Jira REST calls (dev_agent and transform_service both use it)",
+      "action_agent.py is the ONLY file using airbyte-agent-sdk",
+      "action_agent.py must NEVER be called from graph_builder.py — memory_retrieval is query-time only",
       "All Cypher writes: MERGE, never CREATE, for uniquely-keyed nodes",
       "Multi-node writes: single Cypher transaction, never sequential driver calls",
       "httpx.AsyncClient only — never synchronous requests",
@@ -640,11 +846,11 @@ async function main() {
         margin: 0, valign: "top", lineSpacingMultiple: 1.45,
       });
     });
-    footer(s, 16, TOTAL);
+    footer(s, 22, TOTAL);
   }
 
   // ===========================================================================
-  // 17 — Testing & Ops (NEW)
+  // 23 — Testing & Ops (NEW)
   // ===========================================================================
   {
     const s = baseSlide();
@@ -655,7 +861,7 @@ async function main() {
     iconCircle(s, icons.flask, 0.68, 1.55, 0.42, C.purple);
     s.addText("Testing", { x: 1.22, y: 1.62, w: 3.5, h: 0.3, fontSize: 12, bold: true, color: C.white, fontFace: "Calibri", margin: 0 });
     bulletList(s, [
-      "99 automated tests across 13 files, one per build phase (phase14 → phase26)",
+      "126 automated tests across 12 files, one per build phase (phase14 → phase27)",
       "pytest + pytest-anyio, mocked Memgraph driver and LM Studio client — no live services needed to run the suite",
       "Every new memory/algorithm module shipped with its own test file the same session it was written",
       "make test runs the full suite inside the transform_service container",
@@ -674,11 +880,11 @@ async function main() {
       "make dev-agent-trigger / -triage / -runs",
     ], 5.28, 2.05, 4.05, 3.0, { fontSize: 8.4 });
 
-    footer(s, 17, TOTAL);
+    footer(s, 23, TOTAL);
   }
 
   // ===========================================================================
-  // 18 — Live Proof
+  // 24 — Live Proof
   // ===========================================================================
   {
     const s = baseSlide();
@@ -687,7 +893,7 @@ async function main() {
 
     card(s, 0.5, 1.35, 4.35, 3.6, { fill: "FFFFFF", line: "E2E8F0" });
     s.addImage({
-      path: path.join(ASSETS, "memgraph_02_discussed_knowledge_graph.png"),
+      path: path.join(ASSETS, "memgraph_02_discussed_knowledge_graph.jpg"),
       x: 0.6, y: 1.44, w: 4.15, h: 3.42, sizing: { type: "contain", w: 4.15, h: 3.42 },
     });
     s.addText("MATCH (m:Meeting)-[r:DISCUSSED]->(t:Topic) RETURN m, r, t — 162 edges", {
@@ -707,24 +913,24 @@ async function main() {
     card(s, 5.05, 3.15, 4.45, 1.8, { fill: C.bgDeep, line: C.blue });
     s.addText("Live numbers, this session", { x: 5.23, y: 3.26, w: 4.0, h: 0.26, fontSize: 9.5, bold: true, color: C.blue, fontFace: "Calibri", margin: 0 });
     codeBlock(s, [
-      "99/99 tests passing",
-      "264 edges, 13 relationship types",
+      "126/126 tests passing",
+      "266 edges, 13 relationship types",
       "74 meetings · 43 topics · 7 people",
       "vector index size: 74 + 5 (Meeting+Fact)",
     ], 5.23, 3.58, 4.1, 1.3, { fontSize: 8, color: C.light });
 
-    footer(s, 18, TOTAL);
+    footer(s, 24, TOTAL);
   }
 
   // ===========================================================================
-  // 19 — Live Status / API surface
+  // 25 — Live Status / API surface
   // ===========================================================================
   {
     const s = baseSlide();
     kicker(s, "Live status");
     title(s, "What's Working Right Now");
 
-    const stats = [["99", "tests passing", C.green], ["74", "meetings", C.blue], ["264", "edges", C.purple], ["768", "embed dims", C.amber]];
+    const stats = [["126", "tests passing", C.green], ["74", "meetings", C.blue], ["266", "edges", C.purple], ["768", "embed dims", C.amber]];
     let sx = 0.5;
     const sw = 2.2;
     stats.forEach(([num, label, color]) => {
@@ -746,11 +952,11 @@ async function main() {
     s.addText("docker compose up  —  that's the entire deployment.", {
       x: 0.5, y: 4.28, w: 9, h: 0.85, fontSize: 13, bold: true, color: C.teal, align: "center", valign: "middle", fontFace: "Calibri", margin: 0,
     });
-    footer(s, 19, TOTAL);
+    footer(s, 25, TOTAL);
   }
 
   // ===========================================================================
-  // 20 — What This Demonstrates
+  // 26 — What This Demonstrates
   // ===========================================================================
   {
     const s = baseSlide();
@@ -759,9 +965,9 @@ async function main() {
 
     const rows = [
       [icons.dollar, "A cost story, not just a tech demo", "Four cloud services removed since v3 — zero marginal cost per meeting processed"],
-      [icons.database, "Airbyte as the backbone", "3 connectors, incremental sync, webhook-driven, fully bidirectional — the one dependency kept on purpose"],
+      [icons.database, "Airbyte as the backbone — twice over", "Airbyte Cloud does the ELT; Airbyte Agents gives action_agent its Jira tool layer. Two real products, both kept on purpose"],
       [icons.project, "Graph-native, self-aware memory", "Not just storage — the graph ranks, remembers, decays, and reasons about itself"],
-      [icons.robot, "Two autonomous agents, one MCP surface", "One writes to Jira and code, one answers questions — same interface, same safety checkpoints"],
+      [icons.robot, "Three autonomous systems, one philosophy", "dev_agent (code), action_agent (everything else), memory_retrieval (Q&A) — all autonomous up to a human checkpoint, never past it"],
     ];
     let y = 1.45;
     rows.forEach(([icon, h, d]) => {
@@ -770,11 +976,11 @@ async function main() {
       s.addText(d, { x: 1.18, y: y + 0.27, w: 7.9, h: 0.42, fontSize: 9.3, color: C.muted, fontFace: "Calibri", margin: 0 });
       y += 0.8;
     });
-    footer(s, 20, TOTAL);
+    footer(s, 26, TOTAL);
   }
 
   // ===========================================================================
-  // 21 — Extensibility + Closing
+  // 27 — Extensibility + Closing
   // ===========================================================================
   {
     const s = baseSlide();
@@ -794,7 +1000,7 @@ async function main() {
     s.addText("Questions?", { x: 0.5, y: 3.85, w: 9, h: 0.5, fontSize: 12, color: C.lighter, align: "center", fontFace: "Calibri", margin: 0 });
 
     s.addText("Shubham Gaur  ·  meeting-memory-v4", { x: 0.5, y: 4.9, w: 9, h: 0.3, fontSize: 9.5, color: C.muted, align: "center", margin: 0 });
-    footer(s, 21, TOTAL);
+    footer(s, 27, TOTAL);
   }
 
   const outPath = path.join(ASSETS, "Meeting_Memory_v4_Overview.pptx");
