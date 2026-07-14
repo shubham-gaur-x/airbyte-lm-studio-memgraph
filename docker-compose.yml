@@ -114,6 +114,21 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # Opt-in only. The dev agent's free hosted-tier backends (DEV_AGENT_LLM_BACKEND=
+  # openrouter|gemini|groq) route Anthropic-protocol traffic through this proxy, which
+  # translates to the chosen provider. NOT started by default — the local backend needs
+  # no proxy. Start with: docker compose --profile hosted up -d litellm
+  # NOTE: pin/verify the image tag and supply provider keys before relying on this path.
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.74.0-stable
+    profiles: ["hosted"]
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "4000:4000"
+    env_file: .env
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+
 volumes:
   postgres_data:
   memgraph_data:

@@ -212,41 +212,39 @@ async def test_process_ticket_exception_during_execution():
 
 
 # ---------------------------------------------------------------------------
-# triage_backlog — promotion logic
+# triage — sprint-membership candidate discovery (no Backlog status exists)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.anyio
-async def test_triage_backlog_promotes_eligible_tickets():
+async def test_triage_reports_sprint_candidates():
     import dev_agent.orchestrator as orch
 
     candidates = [
-        {"key": "SCRUM-10", "summary": "Fix bug", "status": "Backlog", "labels": []},
-        {"key": "SCRUM-11", "summary": "Add feature", "status": "Backlog", "labels": []},
+        {"key": "SCRUM-10", "summary": "Fix bug", "status": "To Do", "labels": ["dev-agent"]},
+        {"key": "SCRUM-11", "summary": "Add feature", "status": "To Do", "labels": ["dev-agent"]},
     ]
 
     with (
-        patch.object(orch.jira_client, "list_eligible_tickets", AsyncMock(return_value=candidates)),
-        patch.object(orch.jira_client, "transition_issue", AsyncMock(return_value=True)) as mock_transition,
+        patch.object(orch.jira_client, "list_active_sprint_tickets", AsyncMock(return_value=candidates)) as mock_list,
         patch.dict("os.environ", {"JIRA_PROJECT_KEY": "SCRUM"}),
     ):
-        result = await orch.triage_backlog()
+        result = await orch.triage()
 
-    assert result["promoted"] == 2
-    assert mock_transition.call_count == 2
+    # Triage discovers eligible tickets; it must NOT transition them (the poll claims them).
+    assert result["eligible"] == 2
+    assert result["keys"] == ["SCRUM-10", "SCRUM-11"]
+    mock_list.assert_awaited_once()
 
 
 @pytest.mark.anyio
-async def test_triage_backlog_skips_when_transition_fails():
+async def test_triage_empty_when_no_eligible_tickets():
     import dev_agent.orchestrator as orch
 
-    candidates = [{"key": "SCRUM-20", "summary": "Something", "status": "Backlog", "labels": []}]
-
     with (
-        patch.object(orch.jira_client, "list_eligible_tickets", AsyncMock(return_value=candidates)),
-        patch.object(orch.jira_client, "transition_issue", AsyncMock(return_value=False)),
+        patch.object(orch.jira_client, "list_active_sprint_tickets", AsyncMock(return_value=[])),
         patch.dict("os.environ", {"JIRA_PROJECT_KEY": "SCRUM"}),
     ):
-        result = await orch.triage_backlog()
+        result = await orch.triage()
 
-    assert result["promoted"] == 0
-    assert result["skipped"] == 1
+    assert result["eligible"] == 0
+    assert result["keys"] == []

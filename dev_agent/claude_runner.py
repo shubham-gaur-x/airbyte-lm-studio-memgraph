@@ -9,6 +9,7 @@ from typing import Optional
 
 import structlog
 
+from dev_agent.backend import get_backend, resolve_backend_env
 from dev_agent.models import ClaudeRunResult
 
 log = structlog.get_logger()
@@ -21,15 +22,13 @@ async def run_claude_code(
     max_turns: int,
     model: Optional[str] = None,
 ) -> ClaudeRunResult:
-    # Build env — copy parent, override LM Studio endpoints.
-    # ANTHROPIC_API_KEY is explicitly emptied so a real key in the parent
-    # environment can never accidentally route traffic to api.anthropic.com.
+    # Build env — copy parent, then overlay the selected backend's routing.
+    # Default backend is local LM Studio; in local mode ANTHROPIC_API_KEY is
+    # emptied so a real key in the parent env can never route to api.anthropic.com.
+    # Hosted backends are an opt-in exception (DEV_AGENT_LLM_BACKEND) for coding only.
+    backend = get_backend()
     env = os.environ.copy()
-    env["ANTHROPIC_BASE_URL"] = os.environ.get(
-        "LM_STUDIO_ANTHROPIC_URL", "http://host.docker.internal:1234"
-    )
-    env["ANTHROPIC_AUTH_TOKEN"] = "lmstudio"
-    env["ANTHROPIC_API_KEY"] = ""
+    env.update(resolve_backend_env(backend))
 
     cmd = [
         "claude",

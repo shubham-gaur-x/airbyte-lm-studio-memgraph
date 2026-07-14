@@ -10,7 +10,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from dev_agent import db, git_ops, github_client, claude_runner
+from dev_agent import backend, db, git_ops, github_client, claude_runner
+from dev_agent.backend import PreflightError
 from dev_agent.models import ClaudeRunResult
 from transform_service import jira_client
 
@@ -25,7 +26,6 @@ def _env(key: str, default: str = "") -> str:
 
 
 JIRA_PROJECT_KEY = lambda: _env("JIRA_PROJECT_KEY", "SCRUM")
-DEV_AGENT_BACKLOG_STATUS = lambda: _env("DEV_AGENT_BACKLOG_STATUS", "Backlog")
 DEV_AGENT_TODO_STATUS = lambda: _env("DEV_AGENT_TODO_STATUS", "To Do")
 DEV_AGENT_IN_PROGRESS_STATUS = lambda: _env("DEV_AGENT_IN_PROGRESS_STATUS", "In Progress")
 DEV_AGENT_REVIEW_STATUS = lambda: _env("DEV_AGENT_REVIEW_STATUS", "In Review")
@@ -36,6 +36,9 @@ DEV_AGENT_MAX_TURNS = lambda: int(_env("DEV_AGENT_MAX_TURNS", "40"))
 DEV_AGENT_TIMEOUT_SECONDS = lambda: int(_env("DEV_AGENT_TIMEOUT_SECONDS", "1800"))
 DEV_AGENT_MAX_ATTEMPTS = lambda: int(_env("DEV_AGENT_MAX_ATTEMPTS", "1"))
 DEV_AGENT_LM_MODEL = lambda: _env("DEV_AGENT_LM_MODEL") or None
+DEV_AGENT_LLM_BACKEND = lambda: _env("DEV_AGENT_LLM_BACKEND", "local")
+DEV_AGENT_MIN_CONTEXT = lambda: int(_env("DEV_AGENT_MIN_CONTEXT", "32768"))
+DEV_AGENT_REQUIRE_LABELS = lambda: [lbl.strip() for lbl in _env("DEV_AGENT_REQUIRE_LABELS", "dev-agent").split(",") if lbl.strip()]
 GITHUB_OWNER = lambda: _env("GITHUB_OWNER")
 GITHUB_REPO = lambda: _env("GITHUB_REPO")
 GITHUB_TOKEN = lambda: _env("GITHUB_TOKEN")
@@ -80,30 +83,27 @@ Instructions:
 # Triage
 # ---------------------------------------------------------------------------
 
-async def triage_backlog() -> Dict[str, Any]:
-    candidates = await jira_client.list_eligible_tickets(
-        JIRA_PROJECT_KEY(),
-        [DEV_AGENT_BACKLOG_STATUS()],
-        DEV_AGENT_SKIP_LABELS(),
-        require_description=True,
-    )
-    promoted = 0
-    skipped = 0
-    for ticket in candidates:
-        ok = await jira_client.transition_issue(ticket["key"], DEV_AGENT_TODO_STATUS())
-        if ok:
-            promoted += 1
-            log.info("orchestrator.triage.promoted", key=ticket["key"])
-        else:
-            skipped += 1
+async def find_sprint_candidates() -> list[Dict[str, Any]]:
+    """Eligible tickets: in the active sprint, status To Do, labelled for the agent.
 
-    log.info(
-        "orchestrator.triage.done",
-        considered=len(candidates),
-        promoted=promoted,
-        skipped=skipped,
+    There is no Backlog status in the workflow (verified live), so triage is
+    sprint-membership based. Only tickets a human has put in the sprint AND
+    labelled ``dev-agent`` are eligible — a deliberate guardrail.
+    """
+    return await jira_client.list_active_sprint_tickets(
+        JIRA_PROJECT_KEY(),
+        [DEV_AGENT_TODO_STATUS()],
+        DEV_AGENT_REQUIRE_LABELS(),
+        DEV_AGENT_SKIP_LABELS(),
     )
-    return {"considered": len(candidates), "promoted": promoted, "skipped": skipped}
+
+
+async def triage() -> Dict[str, Any]:
+    """Report the eligible sprint candidates (no state change — the poll claims them)."""
+    candidates = await find_sprint_candidates()
+    log.info("orchestrator.triage.done", eligible=len(candidates),
+             keys=[c["key"] for c in candidates])
+    return {"eligible": len(candidates), "keys": [c["key"] for c in candidates]}
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +121,7 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
         ok = await jira_client.transition_issue(key, DEV_AGENT_IN_PROGRESS_STATUS())
         if not ok:
             bound_log.warning("orchestrator.in_progress_transition_failed", key=key)
+        await jira_client.add_comment(key, f"Picked up by dev_agent (backend={DEV_AGENT_LLM_BACKEND()}).")
 
         detail = await jira_client.get_issue_detail(key)
         work_dir = f"{WORK_ROOT()}/{key}"
@@ -186,9 +187,16 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
 async def poll_and_process() -> None:
     log.info("orchestrator.poll.start")
 
-    # Triage is pure Jira API — it doesn't need the repo, so it must not be
-    # blocked by a git failure. It runs first and unconditionally.
-    await triage_backlog()
+    # Preflight the selected LLM backend before touching Jira/git. A misconfigured
+    # or unloaded LM Studio fails fast here with an actionable message instead of
+    # burning a ticket on a doomed run.
+    try:
+        detail = await backend.preflight(DEV_AGENT_LLM_BACKEND(), DEV_AGENT_MIN_CONTEXT())
+        log.info("orchestrator.poll.preflight_ok", backend=DEV_AGENT_LLM_BACKEND(), detail=detail)
+    except PreflightError as exc:
+        log.error("orchestrator.poll.preflight_failed", error=str(exc))
+        log.info("orchestrator.poll.done", attempted=0, reason="preflight_failed")
+        return
 
     try:
         await git_ops.ensure_repo_cloned(REPO_DIR(), GITHUB_OWNER(), GITHUB_REPO(), GITHUB_TOKEN())
@@ -197,11 +205,7 @@ async def poll_and_process() -> None:
         log.info("orchestrator.poll.done", attempted=0, reason="repo_unavailable")
         return
 
-    tickets = await jira_client.list_eligible_tickets(
-        JIRA_PROJECT_KEY(),
-        [DEV_AGENT_TODO_STATUS()],
-        DEV_AGENT_SKIP_LABELS(),
-    )
+    tickets = await find_sprint_candidates()
 
     eligible = []
     for ticket in tickets:
@@ -273,8 +277,19 @@ async def trigger_ticket(ticket_key: str):
 
 @app.post("/triage")
 async def trigger_triage():
-    result = await triage_backlog()
+    result = await triage()
     return result
+
+
+@app.get("/preflight")
+async def check_preflight():
+    """Report whether the selected LLM backend is ready to run."""
+    backend_name = DEV_AGENT_LLM_BACKEND()
+    try:
+        detail = await backend.preflight(backend_name, DEV_AGENT_MIN_CONTEXT())
+        return {"backend": backend_name, "ready": True, "detail": detail}
+    except PreflightError as exc:
+        return {"backend": backend_name, "ready": False, "detail": str(exc)}
 
 
 @app.get("/runs")
