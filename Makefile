@@ -1,4 +1,4 @@
-.PHONY: up down logs shell psql cypher test reset-db setup-memgraph smoke-test backfill tunnels setup-airbyte trigger action-agent-run dev-agent-logs dev-agent-trigger dev-agent-triage dev-agent-runs mcp-setup
+.PHONY: up down logs shell psql cypher test lint typecheck reset-db setup-memgraph smoke-test backfill tunnels setup-airbyte trigger action-agent-run dev-agent-logs dev-agent-trigger dev-agent-triage dev-agent-runs mcp-setup
 
 up:
 	docker compose up -d
@@ -20,6 +20,12 @@ cypher:
 
 test:
 	docker compose exec -w /app transform_service python -m pytest tests/ -v
+
+lint:
+	docker compose exec -w /app transform_service ruff check transform_service dev_agent
+
+typecheck:
+	docker compose exec -w /app transform_service mypy transform_service dev_agent
 
 reset-db:
 	docker compose down -v

@@ -61,7 +61,7 @@ async def link_temporal_chain(
         log.info(
             "episodic_memory.temporal_chain_linked",
             meeting_id=meeting_id,
-            prior_id=record["prior_id"],
+            prior_id=record["prior_id"],  # type: ignore[index]  # guarded by `if linked` above
         )
     return linked
 
@@ -78,7 +78,6 @@ async def detect_causality(meeting: ExtractedMeeting, meeting_id: str) -> int:
 
     client = _get_client()
     model = os.environ["LM_STUDIO_MODEL"]
-    now = datetime.now(timezone.utc).isoformat()
 
     try:
         resp = await client.chat.completions.create(

@@ -208,6 +208,6 @@ async def backfill_embeddings() -> dict:
             )
         facts_embedded += 1
 
-    result = {"meetings_embedded": meetings_embedded, "facts_embedded": facts_embedded}
-    log.info("vector_memory.backfill_done", **result)
-    return result
+    summary = {"meetings_embedded": meetings_embedded, "facts_embedded": facts_embedded}
+    log.info("vector_memory.backfill_done", **summary)
+    return summary

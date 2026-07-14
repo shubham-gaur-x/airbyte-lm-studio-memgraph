@@ -109,7 +109,7 @@ async def run_claude_code(
         )
         return ClaudeRunResult(
             success=False,
-            returncode=proc.returncode,
+            returncode=proc.returncode or 0,
             result_text=error_detail[-2000:],
             duration_ms=duration_ms,
         )

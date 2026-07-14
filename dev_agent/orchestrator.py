@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -29,7 +29,7 @@ DEV_AGENT_BACKLOG_STATUS = lambda: _env("DEV_AGENT_BACKLOG_STATUS", "Backlog")
 DEV_AGENT_TODO_STATUS = lambda: _env("DEV_AGENT_TODO_STATUS", "To Do")
 DEV_AGENT_IN_PROGRESS_STATUS = lambda: _env("DEV_AGENT_IN_PROGRESS_STATUS", "In Progress")
 DEV_AGENT_REVIEW_STATUS = lambda: _env("DEV_AGENT_REVIEW_STATUS", "In Review")
-DEV_AGENT_SKIP_LABELS = lambda: [l.strip() for l in _env("DEV_AGENT_SKIP_LABELS", "meeting-action-item").split(",") if l.strip()]
+DEV_AGENT_SKIP_LABELS = lambda: [lbl.strip() for lbl in _env("DEV_AGENT_SKIP_LABELS", "meeting-action-item").split(",") if lbl.strip()]
 DEV_AGENT_POLL_MINUTES = lambda: int(_env("DEV_AGENT_POLL_MINUTES", "10"))
 DEV_AGENT_BATCH_SIZE = lambda: int(_env("DEV_AGENT_BATCH_SIZE", "5"))
 DEV_AGENT_MAX_TURNS = lambda: int(_env("DEV_AGENT_MAX_TURNS", "40"))
@@ -152,7 +152,7 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
             error_msg = "claude_code reported success but no PR was found for this branch"
             bound_log.error("orchestrator.pr_not_found")
             await db.finish_run(key, "failed", error=error_msg)
-            await jira_client.add_comment(key, f"Dev agent reported success but no PR was found. Needs human follow-up.")
+            await jira_client.add_comment(key, "Dev agent reported success but no PR was found. Needs human follow-up.")
             await jira_client.transition_issue(key, DEV_AGENT_TODO_STATUS())
             return
 

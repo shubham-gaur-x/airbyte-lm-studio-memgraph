@@ -15,3 +15,5 @@ pytest
 anyio[trio]
 pytest-anyio
 airbyte-agent-sdk==0.1.273
+ruff==0.15.21
+mypy==2.3.0

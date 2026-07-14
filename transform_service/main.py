@@ -6,11 +6,9 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict
 
 import httpx
-import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from transform_service import action_agent, db, episodic_memory, graph_algorithms, memgraph_client, procedural_memory, semantic_memory, vector_memory
 from transform_service.memory_retrieval import full_memory_query, person_memory_profile

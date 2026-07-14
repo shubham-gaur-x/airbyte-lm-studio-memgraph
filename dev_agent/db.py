@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 from typing import List, Optional
 
 import asyncpg

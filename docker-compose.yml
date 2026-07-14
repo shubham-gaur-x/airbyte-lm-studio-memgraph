@@ -93,6 +93,7 @@ services:
       - ./scripts:/app/scripts
       - ./tests:/app/tests
       - ./dev_agent:/app/dev_agent
+      - ./pyproject.toml:/app/pyproject.toml
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
