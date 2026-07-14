@@ -112,7 +112,7 @@ client = openai.AsyncOpenAI(
 )
 ```
 
-DO NOT use Ollama. DO NOT use Groq. DO NOT use any cloud LLM.
+DO NOT use Ollama. For extraction, DO NOT use Groq or any cloud LLM — extraction is always local. (Only the dev agent's coding backend is separately toggleable via `DEV_AGENT_LLM_BACKEND`; that never touches extractor.py.)
 
 ---
 
@@ -187,7 +187,7 @@ This is the bidirectional flow — not just writing TO Jira, but also reading FR
 1. **Triage (BACKLOG → TO DO):** Promotes any ticket in BACKLOG that has a non-empty description and no `meeting-action-item` label. No human selects which tickets get worked — this gate is fully autonomous.
 2. **Implement (TO DO → IN PROGRESS → IN REVIEW):** For each eligible TO DO ticket, transitions it to IN PROGRESS, creates a git worktree on branch `agent/<KEY>`, runs headless Claude Code against the ticket description, independently verifies a PR was opened, then transitions to IN REVIEW and posts the PR link as a Jira comment.
 
-**Runs entirely on LM Studio — no Anthropic API key, no exception to the no-cloud-LLM rule.** Claude Code is pointed at LM Studio's native Anthropic-compatible endpoint (`LM_STUDIO_ANTHROPIC_URL`). `ANTHROPIC_API_KEY` is explicitly set to empty in the subprocess env so a key in the parent environment can never accidentally route traffic to api.anthropic.com.
+**Default backend is local LM Studio at zero cost — this is the demo path and the repo default.** Claude Code is pointed at LM Studio's native Anthropic-compatible endpoint (`LM_STUDIO_ANTHROPIC_URL`), and in local mode `ANTHROPIC_API_KEY` is explicitly emptied in the subprocess env so a key in the parent environment can never accidentally route traffic to api.anthropic.com. **A sanctioned, env-gated backend toggle (`DEV_AGENT_LLM_BACKEND`, default `local`) lets other users of this repo switch the dev agent's *coding* work to a hosted model** — real Anthropic Claude (`=claude`) or a free hosted tier (`=openrouter|gemini|groq`) — when they explicitly opt in and supply a key. The exception applies ONLY to dev-agent code implementation; meeting-data extraction stays local always. Local stays the default so the "fully local" demo story and privacy claim hold out of the box.
 
 **The one remaining human checkpoint is merging the PR.** Auto-merge is explicitly NOT implemented in these phases. Do not add it without an explicit go-ahead.
 
@@ -268,7 +268,7 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
 ## Absolute Rules — Do NOT Violate
 
 - DO NOT use Ollama (replaced by LM Studio)
-- DO NOT use Groq or any cloud LLM API
+- DO NOT route meeting-data extraction (`extractor.py` + memory modules) through Groq or any cloud LLM — extraction is ALWAYS local LM Studio, no exceptions. (The dev agent's *coding* backend is the one sanctioned, env-gated, opt-in exception — see the `DEV_AGENT_LLM_BACKEND` note below; it never touches extraction.)
 - DO NOT use Render, Railway, or any cloud deployment
 - DO NOT use Memgraph Cloud (use local Docker Memgraph)
 - DO NOT use Neon Postgres (use local Docker Postgres)
@@ -279,7 +279,7 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
 - DO NOT hardcode any secret or API key in source code
 - DO NOT put Cypher outside `memgraph_client.py`
 - DO NOT put SQL outside `db.py` (or `dev_agent/db.py` for the dev agent's own table)
-- DO NOT call `api.anthropic.com` from `dev_agent` — LM Studio only (no Anthropic API key)
+- DO NOT let `dev_agent` reach a hosted LLM UNLESS `DEV_AGENT_LLM_BACKEND` is explicitly set to a hosted value. Default is `local` (LM Studio, `ANTHROPIC_API_KEY` emptied). `DEV_AGENT_LLM_BACKEND=claude` (or a free hosted tier) is a sanctioned opt-in for other users of this repo, applying ONLY to dev-agent code implementation — never to extraction/meeting data. In local mode, api.anthropic.com must remain unreachable (empty key).
 - DO NOT auto-merge PRs opened by the dev agent — human review is the one remaining checkpoint; do not jump ahead of it
 - DO NOT put Jira REST calls outside `jira_client.py` (applies to `dev_agent` and `transform_service` alike)
 - DO NOT use the Airbyte Agent SDK outside `action_agent.py`
@@ -342,8 +342,16 @@ GITHUB_TOKEN=
 GITHUB_OWNER=shubham-gaur-x
 GITHUB_REPO=airbyte-lm-studio-memgraph
 LM_STUDIO_ANTHROPIC_URL=http://host.docker.internal:1234
-DEV_AGENT_LM_MODEL=gemma3-12b
-DEV_AGENT_BACKLOG_STATUS=Backlog
+# Coding-backend toggle. Default local (LM Studio, $0). Hosted values are an opt-in
+# exception for other users and apply ONLY to dev-agent code work, never to extraction.
+DEV_AGENT_LLM_BACKEND=local            # local | claude | openrouter | gemini | groq
+DEV_AGENT_MIN_CONTEXT=32768            # preflight fails fast below this
+ANTHROPIC_API_KEY=                     # required only when DEV_AGENT_LLM_BACKEND=claude
+OPENROUTER_API_KEY=                    # optional, DEV_AGENT_LLM_BACKEND=openrouter
+GEMINI_API_KEY=                        # optional, DEV_AGENT_LLM_BACKEND=gemini
+GROQ_API_KEY=                          # optional, DEV_AGENT_LLM_BACKEND=groq
+DEV_AGENT_LM_MODEL=gemma3-12b          # coder model for local backend (set to a 7B coder)
+DEV_AGENT_BACKLOG_STATUS=Backlog       # OBSOLETE once triage is sprint-based (Phase 28)
 DEV_AGENT_TODO_STATUS=To Do
 DEV_AGENT_IN_PROGRESS_STATUS=In Progress
 DEV_AGENT_REVIEW_STATUS=In Review
