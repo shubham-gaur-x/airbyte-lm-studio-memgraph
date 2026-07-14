@@ -1,8 +1,9 @@
 """Database layer for dev_agent — owns its own asyncpg pool and dev_agent_runs table."""
 from __future__ import annotations
 
+import json
 import os
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import asyncpg
 import structlog
@@ -46,7 +47,55 @@ async def ensure_table() -> None:
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        # Phase 29 lifecycle columns — additive migration, safe to re-run.
+        await conn.execute(
+            "ALTER TABLE dev_agent_runs ADD COLUMN IF NOT EXISTS state TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE dev_agent_runs ADD COLUMN IF NOT EXISTS state_payload JSONB NOT NULL DEFAULT '{}'::jsonb"
+        )
     log.info("dev_agent.db.table_ensured")
+
+
+async def set_state(
+    ticket_key: str,
+    state: str,
+    payload_merge: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Persist the lifecycle `state` and shallow-merge `payload_merge` into state_payload.
+
+    The merge is done with jsonb `||` so each stage appends its artifacts without
+    clobbering earlier ones (design spec, gate reports, PR url survive across resumes).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE dev_agent_runs
+            SET state = $2,
+                state_payload = state_payload || $3::jsonb
+            WHERE ticket_key = $1
+            """,
+            ticket_key,
+            state,
+            json.dumps(payload_merge or {}),
+        )
+
+
+async def get_active_run() -> Optional[DevAgentRun]:
+    """Return the single non-terminal run to resume, if any (one active run at a time)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM dev_agent_runs
+            WHERE state IS NOT NULL
+              AND state NOT IN ('CLOSED', 'FAILED', 'NEEDS_HUMAN')
+            ORDER BY started_at DESC NULLS LAST
+            LIMIT 1
+            """
+        )
+    return DevAgentRun(**dict(row)) if row else None
 
 
 async def get_run(ticket_key: str) -> Optional[DevAgentRun]:
