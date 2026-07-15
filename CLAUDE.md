@@ -350,7 +350,7 @@ ANTHROPIC_API_KEY=                     # required only when DEV_AGENT_LLM_BACKEN
 OPENROUTER_API_KEY=                    # optional, DEV_AGENT_LLM_BACKEND=openrouter
 GEMINI_API_KEY=                        # optional, DEV_AGENT_LLM_BACKEND=gemini
 GROQ_API_KEY=                          # optional, DEV_AGENT_LLM_BACKEND=groq
-DEV_AGENT_LM_MODEL=gemma3-12b          # coder model for local backend (set to a 7B coder)
+DEV_AGENT_LM_MODEL=qwen2.5-coder-7b-instruct   # local coder model, loaded in LM Studio at 32k ctx (gemma3-12b stays for extraction)
 DEV_AGENT_BACKLOG_STATUS=Backlog       # OBSOLETE once triage is sprint-based (Phase 28)
 DEV_AGENT_TODO_STATUS=To Do
 DEV_AGENT_IN_PROGRESS_STATUS=In Progress

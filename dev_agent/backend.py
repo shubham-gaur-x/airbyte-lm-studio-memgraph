@@ -55,11 +55,22 @@ def resolve_backend_env(backend: str) -> Dict[str, str]:
       - hosted tiers: route through the LiteLLM proxy, ANTHROPIC_API_KEY == "".
     """
     if backend == "local":
-        return {
+        env = {
             "ANTHROPIC_BASE_URL": _lm_studio_root(),
             "ANTHROPIC_AUTH_TOKEN": "lmstudio",
             "ANTHROPIC_API_KEY": "",
         }
+        # Pin BOTH the main and the background "small/fast" model to the one loaded
+        # model. Claude Code otherwise requests a default haiku id for background work;
+        # LM Studio's JIT loader then tries to load that unknown id, evicts the loaded
+        # coder model, and reloads it at the default 8192 context — the original
+        # dev-agent blocker (reproduced live). Pinning both keeps every request on the
+        # 32k model already in memory.
+        model = os.environ.get("DEV_AGENT_LM_MODEL", "").strip()
+        if model:
+            env["ANTHROPIC_MODEL"] = model
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+        return env
     if backend == "claude":
         return {
             "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),

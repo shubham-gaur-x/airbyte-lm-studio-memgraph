@@ -257,6 +257,60 @@ async def update_action_jira_status(jira_key: str, status: str) -> None:
         )
 
 
+async def merge_ticket_resolved_by_pr(
+    ticket_key: str,
+    pr_url: str,
+    ticket_summary: str = "",
+    ticket_status: str = "Done",
+    ticket_jira_url: str = "",
+    merged_at: Optional[str] = None,
+) -> Dict[str, str]:
+    """Close the dev-agent loop: MERGE (:Ticket)-[:RESOLVED_BY]->(:PullRequest), ACID.
+
+    Node ID derivation is the single source of truth in dev_agent/lifecycle.py:
+      ticket id = uuid5("ticket", key); PR id = uuid5("pullrequest", url).
+    We recompute the same uuid5(namespace, value) here so writer and reader never drift.
+    Any ActionItem already carrying this ticket's jira_key is marked done in the same
+    transaction, so the graph reflects real completion once the PR merges.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    merged_at = merged_at or now
+    ticket_id = uuid5_id("ticket", ticket_key)
+    pr_id = uuid5_id("pullrequest", pr_url)
+
+    driver = get_driver()
+    async with driver.session() as session:
+        async with await session.begin_transaction() as tx:
+            await tx.run(
+                """
+                MERGE (t:Ticket {id: $ticket_id})
+                ON CREATE SET t.created_at = $now
+                SET t.key = $key, t.summary = $summary, t.status = $status,
+                    t.url = $jira_url, t.updated_at = $now
+                MERGE (pr:PullRequest {id: $pr_id})
+                ON CREATE SET pr.created_at = $now
+                SET pr.url = $pr_url, pr.merged_at = $merged_at, pr.updated_at = $now
+                MERGE (t)-[r:RESOLVED_BY]->(pr)
+                ON CREATE SET r.created_at = $now
+                """,
+                ticket_id=ticket_id, pr_id=pr_id, key=ticket_key, summary=ticket_summary,
+                status=ticket_status, jira_url=ticket_jira_url, pr_url=pr_url,
+                merged_at=merged_at, now=now,
+            )
+            # Mark any linked ActionItem completed (measured, not guessed).
+            await tx.run(
+                """
+                MATCH (a:ActionItem {jira_key: $key})
+                SET a.jira_status = 'Done', a.done = true, a.updated_at = $now
+                """,
+                key=ticket_key, now=now,
+            )
+            await tx.commit()
+    log.info("memgraph.resolved_by_merged", ticket_key=ticket_key, pr_url=pr_url,
+             ticket_id=ticket_id, pr_id=pr_id)
+    return {"ticket_id": ticket_id, "pr_id": pr_id}
+
+
 async def get_timeline(window: Literal["day", "week", "month"]) -> Dict[str, Any]:
     from datetime import timedelta
     hours = {"day": 24, "week": 168, "month": 720}[window]

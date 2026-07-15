@@ -77,6 +77,15 @@ class TestDeterministicIds:
         assert pr == lc.pull_request_node_id("https://github.com/o/r/pull/7")
         assert t1 != pr
 
+    def test_close_loop_writer_shares_id_namespaces(self):
+        # memgraph_client.merge_ticket_resolved_by_pr re-derives node ids with these exact
+        # namespaces (it cannot import dev_agent — wrong dependency direction). If lifecycle
+        # ever changes a namespace, writer and reader would silently diverge (the known
+        # ID-mismatch bug class), so pin the shared contract here.
+        from transform_service.utils import uuid5_id
+        assert lc.ticket_node_id("SCRUM-42") == uuid5_id("ticket", "SCRUM-42")
+        assert lc.pull_request_node_id("https://x/pull/1") == uuid5_id("pullrequest", "https://x/pull/1")
+
 
 class TestRunStatePayloadCoercion:
     def test_jsonb_string_is_parsed(self):

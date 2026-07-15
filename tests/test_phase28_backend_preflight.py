@@ -32,6 +32,22 @@ class TestResolveBackendEnv:
         assert env["ANTHROPIC_BASE_URL"] == "http://host.docker.internal:1234"
         assert env["ANTHROPIC_AUTH_TOKEN"] == "lmstudio"
 
+    def test_local_pins_small_fast_model_to_loaded_coder(self, monkeypatch):
+        # Prevents LM Studio's JIT loader from evicting the loaded 32k coder model when
+        # Claude Code issues background (small/fast) requests. Reproduced live: an
+        # unpinned small model triggers a reload at the default 8192 ctx — the original
+        # dev-agent blocker. Both main and small/fast must point at the one loaded model.
+        monkeypatch.setenv("DEV_AGENT_LM_MODEL", "qwen2.5-coder-7b-instruct")
+        env = backend.resolve_backend_env("local")
+        assert env["ANTHROPIC_MODEL"] == "qwen2.5-coder-7b-instruct"
+        assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "qwen2.5-coder-7b-instruct"
+
+    def test_local_without_model_omits_pins(self, monkeypatch):
+        monkeypatch.delenv("DEV_AGENT_LM_MODEL", raising=False)
+        env = backend.resolve_backend_env("local")
+        assert "ANTHROPIC_SMALL_FAST_MODEL" not in env
+        assert env["ANTHROPIC_API_KEY"] == ""
+
     def test_claude_passes_real_key_to_anthropic(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real")
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
