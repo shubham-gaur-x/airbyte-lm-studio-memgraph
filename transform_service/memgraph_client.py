@@ -352,6 +352,31 @@ async def get_meetings_quality_inputs() -> List[Dict[str, Any]]:
     return rows
 
 
+async def get_meetings_quality_ranked(limit: int = 20) -> List[Dict[str, Any]]:
+    """Meetings that have a quality_score, ranked worst-first (for the demo endpoint)."""
+    driver = get_driver()
+    rows: List[Dict[str, Any]] = []
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (m:Meeting) WHERE m.quality_score IS NOT NULL
+            RETURN m.title AS title, m.quality_score AS quality_score,
+                   m.quality_components AS components, m.quality_computed_at AS computed_at
+            ORDER BY m.quality_score ASC
+            LIMIT $limit
+            """,
+            limit=limit,
+        )
+        async for rec in result:
+            rows.append({
+                "title": rec["title"],
+                "quality_score": rec["quality_score"],
+                "components": rec["components"],
+                "computed_at": rec["computed_at"],
+            })
+    return rows
+
+
 async def set_meeting_quality(
     meeting_id: str, quality_score: Optional[float], components: Dict[str, Any]
 ) -> None:

@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from transform_service import action_agent, db, episodic_memory, graph_algorithms, memgraph_client, procedural_memory, semantic_memory, vector_memory
+from transform_service import action_agent, db, episodic_memory, graph_algorithms, meeting_quality, memgraph_client, procedural_memory, semantic_memory, vector_memory
 from transform_service.memory_retrieval import full_memory_query, person_memory_profile
 from transform_service.digest import weekly_digest
 from transform_service.graph_builder import process_new_emails, process_new_events
@@ -94,6 +94,11 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         action_agent.process_action_items,
         "interval", minutes=5, id="action_agent_poll",
+    )
+    scheduler.add_job(
+        meeting_quality.score_all_meetings,
+        "cron", hour=3, minute=0,
+        id="nightly_meeting_quality",
     )
     scheduler.start()
     log.info("service.scheduler_started", interval_minutes=5)
@@ -184,6 +189,12 @@ async def topic(name: str) -> Dict[str, Any]:
 async def actions_open() -> Dict[str, Any]:
     actions = await memgraph_client.get_open_actions()
     return {"actions": actions, "count": len(actions)}
+
+
+@app.get("/meetings/quality")
+async def meetings_quality(limit: int = 20) -> Dict[str, Any]:
+    ranked = await memgraph_client.get_meetings_quality_ranked(limit)
+    return {"meetings": ranked, "count": len(ranked)}
 
 
 @app.get("/graph/timeline")
