@@ -311,6 +311,68 @@ async def merge_ticket_resolved_by_pr(
     return {"ticket_id": ticket_id, "pr_id": pr_id}
 
 
+async def get_meetings_quality_inputs() -> List[Dict[str, Any]]:
+    """Per-meeting raw features for quality scoring (Phase 31). Counts are graph-derived.
+
+    Decisions link via (Meeting)-[:PRODUCED]->(Decision); action items via
+    (Meeting)-[:FOLLOWS_UP]->(ActionItem). ``agenda_text`` falls back to the summary since
+    calendar descriptions are not stored on the node yet (documented follow-up).
+    """
+    driver = get_driver()
+    rows: List[Dict[str, Any]] = []
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (m:Meeting)
+            OPTIONAL MATCH (m)-[:PRODUCED]->(d:Decision)
+            OPTIONAL MATCH (m)-[:FOLLOWS_UP]->(a:ActionItem)
+            OPTIONAL MATCH (m)<-[:ATTENDED]-(p:Person)
+            WITH m,
+                 count(DISTINCT d) AS n_decisions,
+                 count(DISTINCT a) AS n_actions,
+                 count(DISTINCT CASE WHEN a.done THEN a END) AS n_actions_done,
+                 count(DISTINCT p) AS n_attended
+            RETURN m.id AS id, m.title AS title, m.duration_minutes AS duration_minutes,
+                   m.summary AS summary, n_decisions, n_actions, n_actions_done, n_attended
+            """
+        )
+        async for rec in result:
+            rows.append({
+                "id": rec["id"],
+                "title": rec["title"],
+                "duration_minutes": rec["duration_minutes"],
+                "agenda_text": rec["summary"],
+                "n_decisions": rec["n_decisions"] or 0,
+                "n_actions": rec["n_actions"] or 0,
+                "n_actions_done": rec["n_actions_done"] or 0,
+                "attended": rec["n_attended"] or 0,
+                "invited": None,  # calendar invited-count wiring is a follow-up
+                "recurrence_scores": [],
+            })
+    return rows
+
+
+async def set_meeting_quality(
+    meeting_id: str, quality_score: Optional[float], components: Dict[str, Any]
+) -> None:
+    """Persist Phase 31 quality onto the Meeting node (MERGE, single statement)."""
+    now = datetime.now(timezone.utc).isoformat()
+    driver = get_driver()
+    async with driver.session() as session:
+        await session.run(
+            """
+            MERGE (m:Meeting {id: $id})
+            SET m.quality_score = $score,
+                m.quality_components = $components,
+                m.quality_computed_at = $now
+            """,
+            id=meeting_id,
+            score=quality_score,
+            components={k: v for k, v in components.items() if v is not None},
+            now=now,
+        )
+
+
 async def get_timeline(window: Literal["day", "week", "month"]) -> Dict[str, Any]:
     from datetime import timedelta
     hours = {"day": 24, "week": 168, "month": 720}[window]
