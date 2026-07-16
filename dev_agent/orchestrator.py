@@ -134,7 +134,7 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
             prompt,
             timeout_seconds=DEV_AGENT_TIMEOUT_SECONDS(),
             max_turns=DEV_AGENT_MAX_TURNS(),
-            model=DEV_AGENT_LM_MODEL(),
+            model=backend.model_for_run(DEV_AGENT_LLM_BACKEND()),
         )
 
         if not result.success:

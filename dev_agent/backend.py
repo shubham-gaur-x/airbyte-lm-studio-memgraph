@@ -27,6 +27,30 @@ _HOSTED_KEY_ENV = {
     "groq": "GROQ_API_KEY",
 }
 
+# The LiteLLM model_list aliases (see litellm/config.yaml). Claude Code must request one
+# of these so the proxy routes to the right provider; a default/unknown model id would
+# 400 at the proxy (same class of failure as the local JIT-eviction blocker). Both the
+# main and the background "small/fast" model are pinned to the alias.
+_HOSTED_MODEL_ALIAS = {
+    "openrouter": "dev-agent-coder-openrouter",
+    "gemini": "dev-agent-coder-gemini",
+    "groq": "dev-agent-coder-groq",
+}
+
+
+def model_for_run(backend: str) -> Optional[str]:
+    """Model id to pass to ``claude --model`` for the given backend.
+
+    local  -> the loaded LM Studio model (DEV_AGENT_LM_MODEL)
+    hosted -> the LiteLLM alias that routes to the provider
+    claude -> None (use Claude Code's default Anthropic model)
+    """
+    if backend in _HOSTED_MODEL_ALIAS:
+        return _HOSTED_MODEL_ALIAS[backend]
+    if backend == "local":
+        return os.environ.get("DEV_AGENT_LM_MODEL", "").strip() or None
+    return None
+
 
 class PreflightError(RuntimeError):
     """Raised when the selected backend is not ready to run (actionable message)."""
@@ -78,10 +102,15 @@ def resolve_backend_env(backend: str) -> Dict[str, str]:
             "ANTHROPIC_AUTH_TOKEN": "",
         }
     if backend in _HOSTED_KEY_ENV:
+        alias = _HOSTED_MODEL_ALIAS[backend]
         return {
             "ANTHROPIC_BASE_URL": os.environ.get("LITELLM_PROXY_URL", "http://litellm:4000"),
             "ANTHROPIC_AUTH_TOKEN": os.environ.get(_HOSTED_KEY_ENV[backend], ""),
             "ANTHROPIC_API_KEY": "",
+            # Pin both models to the LiteLLM alias so Claude Code never requests an
+            # unknown default id that the proxy would reject.
+            "ANTHROPIC_MODEL": alias,
+            "ANTHROPIC_SMALL_FAST_MODEL": alias,
         }
     raise ValueError(f"Unknown backend {backend!r}")
 

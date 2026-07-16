@@ -66,6 +66,22 @@ class TestResolveBackendEnv:
         assert env["ANTHROPIC_BASE_URL"] == "http://litellm:4000"
         assert env["ANTHROPIC_AUTH_TOKEN"] == "provider-key"
         assert env["ANTHROPIC_API_KEY"] == ""
+        # Both models pinned to the LiteLLM alias so the proxy never sees an unknown id.
+        assert env["ANTHROPIC_MODEL"] == f"dev-agent-coder-{name}"
+        assert env["ANTHROPIC_SMALL_FAST_MODEL"] == f"dev-agent-coder-{name}"
+
+
+class TestModelForRun:
+    def test_hosted_returns_alias(self):
+        assert backend.model_for_run("groq") == "dev-agent-coder-groq"
+        assert backend.model_for_run("openrouter") == "dev-agent-coder-openrouter"
+
+    def test_local_returns_lm_model(self, monkeypatch):
+        monkeypatch.setenv("DEV_AGENT_LM_MODEL", "qwen2.5-coder-7b-instruct")
+        assert backend.model_for_run("local") == "qwen2.5-coder-7b-instruct"
+
+    def test_claude_returns_none(self):
+        assert backend.model_for_run("claude") is None
 
 
 class TestGetBackend:
