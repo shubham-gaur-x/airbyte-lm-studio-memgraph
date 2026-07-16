@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import re
 import uuid
 from datetime import date
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, List, Optional, TypeVar
 
 import structlog
 
@@ -17,6 +18,22 @@ _NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 def uuid5_id(namespace: str, value: str) -> str:
     ns = uuid.uuid5(_NAMESPACE, namespace)
     return str(uuid.uuid5(ns, value))
+
+
+# Jira-style ticket key: 2+ uppercase letters, hyphen, digits (e.g. SCRUM-47). Word
+# boundaries avoid matching inside longer tokens. Used for Phase 32 MENTIONS edges
+# (Meeting -> Ticket) via regex over meeting text — no LLM.
+_TICKET_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+
+
+def extract_ticket_keys(text: Optional[str]) -> List[str]:
+    """Return de-duplicated Jira ticket keys found in free text, order-preserving."""
+    if not text:
+        return []
+    seen: dict[str, None] = {}
+    for m in _TICKET_KEY_RE.findall(text):
+        seen.setdefault(m, None)
+    return list(seen)
 
 
 def strip_json_fences(raw: str) -> str:

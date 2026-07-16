@@ -311,6 +311,75 @@ async def merge_ticket_resolved_by_pr(
     return {"ticket_id": ticket_id, "pr_id": pr_id}
 
 
+async def migrate_schema_v5(extractor_version: str = "v5") -> Dict[str, int]:
+    """Phase 32 additive migration — idempotent (MERGE-only), safe to re-run.
+
+    1. Ensures constraints for the new node types (Ticket/PullRequest/Team/Project).
+    2. Backfills provenance defaults (extracted_at/extractor_version) on extracted nodes
+       that lack them — never overwrites existing provenance.
+    3. Adds (:Meeting)-[:MENTIONS]->(:Ticket) for ticket keys found in meeting text
+       (regex via utils.extract_ticket_keys; no LLM, no re-extraction).
+
+    Returns per-change counts. Running twice yields identical graph (counts of *new*
+    changes drop to zero on the second run).
+    """
+    from transform_service.utils import extract_ticket_keys
+
+    now = datetime.now(timezone.utc).isoformat()
+    driver = get_driver()
+    counts = {"constraints": 0, "provenance_backfilled": 0, "mentions_added": 0}
+
+    new_constraints = [
+        "CREATE CONSTRAINT ON (t:Ticket) ASSERT t.id IS UNIQUE",
+        "CREATE CONSTRAINT ON (pr:PullRequest) ASSERT pr.id IS UNIQUE",
+        "CREATE CONSTRAINT ON (tm:Team) ASSERT tm.name IS UNIQUE",
+        "CREATE CONSTRAINT ON (pj:Project) ASSERT pj.key IS UNIQUE",
+    ]
+    async with driver.session() as session:
+        for cypher in new_constraints:
+            try:
+                await session.run(cypher)
+                counts["constraints"] += 1
+            except Exception as exc:
+                if "already exists" not in str(exc).lower():
+                    log.warning("migrate_v5.constraint_warning", cypher=cypher, error=str(exc))
+
+        # Provenance backfill on extracted node types missing extractor_version.
+        res = await session.run(
+            """
+            MATCH (n) WHERE (n:Meeting OR n:Decision OR n:ActionItem OR n:Fact)
+                        AND n.extractor_version IS NULL
+            SET n.extractor_version = $ver, n.extracted_at = coalesce(n.created_at, $now)
+            RETURN count(n) AS c
+            """,
+            ver=extractor_version, now=now,
+        )
+        rec = await res.single()
+        counts["provenance_backfilled"] = (rec and rec["c"]) or 0
+
+        # MENTIONS from regex over meeting title + summary.
+        meetings = await session.run("MATCH (m:Meeting) RETURN m.id AS id, m.title AS title, m.summary AS summary")
+        rows = [dict(r) async for r in meetings]
+
+    for row in rows:
+        keys = extract_ticket_keys(f"{row.get('title') or ''} {row.get('summary') or ''}")
+        for key in keys:
+            async with driver.session() as session:
+                await session.run(
+                    """
+                    MATCH (m:Meeting {id: $mid})
+                    MERGE (t:Ticket {id: $tid})
+                    ON CREATE SET t.created_at = $now, t.key = $key
+                    MERGE (m)-[r:MENTIONS]->(t)
+                    ON CREATE SET r.created_at = $now, r.source = 'regex'
+                    """,
+                    mid=row["id"], tid=uuid5_id("ticket", key), key=key, now=now,
+                )
+            counts["mentions_added"] += 1
+    log.info("migrate_v5.done", **counts)
+    return counts
+
+
 async def get_meetings_quality_inputs() -> List[Dict[str, Any]]:
     """Per-meeting raw features for quality scoring (Phase 31). Counts are graph-derived.
 
