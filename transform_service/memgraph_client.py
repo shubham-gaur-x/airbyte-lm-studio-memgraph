@@ -241,11 +241,11 @@ async def update_action_jira_key(action_id: str, jira_key: str) -> None:
         )
 
 
-async def update_action_jira_status(jira_key: str, status: str) -> None:
+async def update_action_jira_status(jira_key: str, status: str) -> bool:
     driver = get_driver()
     done = status.lower() in ("done", "closed", "resolved")
     async with driver.session() as session:
-        await session.run(
+        result = await session.run(
             """
             MATCH (a:ActionItem {jira_key: $jira_key})
             SET a.jira_status = $status, a.done = $done, a.updated_at = $now
@@ -255,6 +255,8 @@ async def update_action_jira_status(jira_key: str, status: str) -> None:
             done=done,
             now=datetime.now(timezone.utc).isoformat(),
         )
+        summary = await result.consume()
+        return summary.counters.properties_set > 0
 
 
 async def get_timeline(window: Literal["day", "week", "month"]) -> Dict[str, Any]:
