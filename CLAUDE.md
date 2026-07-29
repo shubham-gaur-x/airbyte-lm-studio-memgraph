@@ -265,6 +265,11 @@ past bug class, so never derive these ids anywhere else.
   `memgraph_client.get_open_actions_for_owner` + `dedup.best_match`; on a match above
   `JIRA_DEDUP_THRESHOLD` it links `(existing ActionItem)-[:MENTIONED_IN]->(new Meeting)` and comments
   on the existing ticket instead of opening a duplicate (gated by `JIRA_DEDUP_ENABLED`, default true).
+- `transform_service/meeting_type_router.py` (P6) is a cheap rules-based step between `classify()`
+  (the "worth processing" gate) and `extract_meeting()`. `route()` picks a type (standup / planning /
+  review / one_on_one / email_thread / general, derived from real meeting titles) and `prompt_hint()`
+  returns type-specific guidance that `graph_builder` passes to `extract_meeting(type_hint=...)`, which
+  appends it to the system prompt. Different types produce structurally different action items.
 
 ---
 

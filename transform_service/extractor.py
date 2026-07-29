@@ -91,18 +91,23 @@ async def extract_meeting(
     text: str,
     source_type: str,
     context: Optional[Dict[str, Any]] = None,
+    type_hint: Optional[str] = None,
 ) -> Optional[ExtractedMeeting]:
     client = _get_client()
     model = os.environ["LM_STUDIO_MODEL"]
     start = time.monotonic()
 
     user_prompt = f"Extract meeting information from this {source_type}:\n\n{text}"
+    # P6: append meeting-type-specific guidance so extraction fits the meeting type.
+    system_prompt = _SYSTEM_PROMPT
+    if type_hint:
+        system_prompt = f"{_SYSTEM_PROMPT}\n\nMeeting-type guidance:\n{type_hint}"
 
     try:
         response = await client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.0,

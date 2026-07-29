@@ -4,7 +4,7 @@ import asyncio
 
 import structlog
 
-from transform_service import db, episodic_memory, graph_algorithms, memgraph_client, procedural_memory, semantic_memory, vector_memory
+from transform_service import db, episodic_memory, graph_algorithms, meeting_type_router, memgraph_client, procedural_memory, semantic_memory, vector_memory
 from transform_service.classifier import classify
 from transform_service.extractor import extract_meeting
 from transform_service.jira_pusher import push_action_items
@@ -28,7 +28,11 @@ async def process_email(email: RawEmail) -> bool:
             return False
 
         bound = bound.bind(step="extract")
-        meeting = await extract_meeting(text, "email")
+        # P6: route to a meeting type and extract with a type-specific prompt.
+        mtype = meeting_type_router.route(email.subject, email.body, source_type="email")
+        meeting = await extract_meeting(
+            text, "email", type_hint=meeting_type_router.prompt_hint(mtype),
+        )
 
         if not meeting:
             bound.warning("graph_builder.extract_failed")
@@ -103,9 +107,12 @@ async def process_calendar_event(event: RawCalendarEvent) -> bool:
         bound = bound.bind(step="extract")
         # Pass the event date so extractor can fill it when LLM returns null
         event_date = event.start_time[:10] if event.start_time and len(event.start_time) >= 10 else None
+        # P6: route to a meeting type and extract with a type-specific prompt.
+        mtype = meeting_type_router.route(event.title, event.description or "", source_type="calendar_event")
         meeting = await extract_meeting(
             text, "calendar_event",
             context={"date": event_date, "platform": "google_calendar"},
+            type_hint=meeting_type_router.prompt_hint(mtype),
         )
 
         if not meeting:
