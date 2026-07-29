@@ -211,20 +211,25 @@ async def get_unprocessed_emails(limit: int = 50) -> List[RawEmail]:
                 """,
                 limit,
             )
-            return [
-                RawEmail(
-                    id=r["source_id"],
-                    source_id=r["source_id"],
-                    subject=r["subject"] or "(no subject)",
-                    from_email=r["from_email"] or "",
-                    to_emails=[r["to_email"]] if r["to_email"] else [],
-                    body=r["snippet"],
-                    received_at=str(r["received_at"]) if r["received_at"] else "",
-                    processed=False,
-                    source_table="messages_details",
-                )
-                for r in rows
-            ]
+            # Only short-circuit when Airbyte actually has unprocessed rows — the table
+            # existing but being empty/exhausted (e.g. between syncs) must still fall
+            # through to raw_emails, or the "preferred with fallback" docstring is a lie
+            # and manual/test-seeded rows sit unprocessed forever once Airbyte is wired up.
+            if rows:
+                return [
+                    RawEmail(
+                        id=r["source_id"],
+                        source_id=r["source_id"],
+                        subject=r["subject"] or "(no subject)",
+                        from_email=r["from_email"] or "",
+                        to_emails=[r["to_email"]] if r["to_email"] else [],
+                        body=r["snippet"],
+                        received_at=str(r["received_at"]) if r["received_at"] else "",
+                        processed=False,
+                        source_table="messages_details",
+                    )
+                    for r in rows
+                ]
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -288,20 +293,23 @@ async def get_unprocessed_events(limit: int = 50) -> List[RawCalendarEvent]:
                 """,
                 limit,
             )
-            return [
-                RawCalendarEvent(
-                    id=str(r["id"]),
-                    source_id=r["source_id"],
-                    title=r["title"],
-                    description=r["description"],
-                    start_time=r["start_time"] or "",
-                    end_time=r["end_time"] or "",
-                    attendees_json=r["attendees_json"],
-                    processed=r["processed"],
-                    source_table="raw_gcal_events",
-                )
-                for r in rows
-            ]
+            # Same fallback rule as get_unprocessed_emails: table existing is not enough,
+            # it must actually have unprocessed rows or manual/seeded events never process.
+            if rows:
+                return [
+                    RawCalendarEvent(
+                        id=str(r["id"]),
+                        source_id=r["source_id"],
+                        title=r["title"],
+                        description=r["description"],
+                        start_time=r["start_time"] or "",
+                        end_time=r["end_time"] or "",
+                        attendees_json=r["attendees_json"],
+                        processed=r["processed"],
+                        source_table="raw_gcal_events",
+                    )
+                    for r in rows
+                ]
 
         # Fallback: our manual staging table
         rows = await conn.fetch(
