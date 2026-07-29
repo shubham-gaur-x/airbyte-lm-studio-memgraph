@@ -15,6 +15,49 @@ from dev_agent.models import ClaudeRunResult
 log = structlog.get_logger()
 
 
+async def run_oneshot(
+    prompt: str,
+    timeout_seconds: int,
+    model: Optional[str] = None,
+) -> Optional[str]:
+    """Run a single-turn, no-tools ``claude -p`` through the selected backend.
+
+    Returns the model's answer text (the JSON ``result`` field) or None on failure.
+    For cheap scoring passes (e.g. P8 self-verification), NOT for code work — hence no
+    tools, no work_dir, and ``--max-turns 1``.
+    """
+    backend = get_backend()
+    env = os.environ.copy()
+    env.update(resolve_backend_env(backend))
+
+    cmd = ["claude", "-p", prompt, "--output-format", "json", "--max-turns", "1"]
+    if model:
+        cmd += ["--model", model]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=float(timeout_seconds)
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.warning("claude_runner.oneshot_timeout", timeout_seconds=timeout_seconds)
+        return None
+    except Exception as exc:
+        log.warning("claude_runner.oneshot_error", error=str(exc))
+        return None
+
+    out = stdout_bytes.decode(errors="replace")
+    try:
+        return json.loads(out).get("result", "") or None
+    except (json.JSONDecodeError, ValueError):
+        return out or None
+
+
 async def run_claude_code(
     work_dir: str,
     prompt: str,
