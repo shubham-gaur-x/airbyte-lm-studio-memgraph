@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from dev_agent import backend, db, git_ops, github_client, claude_runner, self_verify
+from dev_agent import backend, db, git_ops, github_client, claude_runner, self_verify, session_memory
 from dev_agent.backend import PreflightError
 from dev_agent.models import ClaudeRunResult
 from transform_service import jira_client, memgraph_client
@@ -50,10 +50,14 @@ WORK_ROOT = lambda: _env("DEV_AGENT_WORK_ROOT", "/work/worktrees")
 # Prompt
 # ---------------------------------------------------------------------------
 
-def build_prompt(ticket: Dict[str, Any]) -> str:
+def build_prompt(ticket: Dict[str, Any], resume_context: Optional[str] = None) -> str:
     key = ticket["key"]
     summary = ticket.get("summary", "")
     description = ticket.get("description", "")
+    resume_block = (
+        f"\nResume context from a previous attempt (use it, do not start over):\n{resume_context}\n"
+        if resume_context else ""
+    )
     return f"""Read CLAUDE.md and follow all conventions in this repository.
 
 Implement the following Jira ticket in full:
@@ -62,7 +66,7 @@ Ticket: {key}
 Summary: {summary}
 Description:
 {description}
-
+{resume_block}
 Instructions:
 - Implement the ticket completely.
 - Run the test suite (pytest / make test if pytest isn't available directly) and confirm it passes before finishing.
@@ -127,7 +131,9 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
         work_dir = f"{WORK_ROOT()}/{key}"
 
         await git_ops.create_worktree(REPO_DIR(), work_dir, branch_name)
-        prompt = build_prompt(detail)
+        # P7: on a retry, feed the prior attempt's resume context instead of starting cold.
+        resume_context = await session_memory.load_resume_context(key)
+        prompt = build_prompt(detail, resume_context=resume_context)
 
         result: ClaudeRunResult = await claude_runner.run_claude_code(
             work_dir,
@@ -161,6 +167,11 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
                     "Dev agent could not complete this ticket automatically. Needs human "
                     f"follow-up.\n\nError: {reason}",
                 )
+            # P7: record a resumable session memory even on failure (no PR) so a retry
+            # continues from here instead of cold.
+            await session_memory.record(
+                detail, outcome="failed", error=reason, raw_notes=result.result_text or "",
+            )
             await jira_client.transition_issue(key, DEV_AGENT_TODO_STATUS())
             return
 
@@ -168,6 +179,7 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
         # pass through the SAME backend. It never blocks review: a low score only flags the
         # comment and sets AgentRun.verified=false. Non-fatal.
         verdict = None
+        diff = ""
         try:
             diff = await github_client.get_pr_diff(GITHUB_OWNER(), GITHUB_REPO(), pr["number"])
             verdict = await self_verify.verify_pr(
@@ -213,6 +225,12 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
             bound_log.warning("orchestrator.review_transition_failed", key=key)
 
         await db.finish_run(key, "pr_opened", pr_url=pr["html_url"], pr_number=pr["number"])
+        # P7: record the session memory (files changed pulled from the PR diff).
+        await session_memory.record(
+            detail, outcome="pr_opened", pr=pr,
+            files_changed=session_memory.files_from_diff(diff),
+            verdict=verdict, raw_notes=result.result_text or "",
+        )
         bound_log.info(
             "orchestrator.ticket_done", pr_url=pr["html_url"],
             run_success=result.success, verified=verified,
@@ -222,6 +240,10 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
         bound_log.error("orchestrator.unexpected_error", exc_info=True)
         try:
             await db.finish_run(key, "failed", error=str(exc))
+        except Exception:
+            pass
+        try:
+            await session_memory.record(ticket, outcome="failed", error=str(exc))
         except Exception:
             pass
         try:

@@ -82,6 +82,28 @@ async def set_state(
         )
 
 
+async def save_session_memory(ticket_key: str, memory: Dict[str, Any]) -> None:
+    """Merge the P7 AgentMemory record into state_payload under the ``memory`` key.
+
+    Uses jsonb ``||`` so it coexists with lifecycle stage artifacts and survives across
+    attempts (the resume read on a retry happens before any new PR/AgentRun node exists).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE dev_agent_runs SET state_payload = state_payload || $2::jsonb WHERE ticket_key = $1",
+            ticket_key,
+            json.dumps({"memory": memory}),
+        )
+
+
+async def get_session_memory(ticket_key: str) -> Optional[Dict[str, Any]]:
+    run = await get_run(ticket_key)
+    if run is None:
+        return None
+    return run.state_payload.get("memory")
+
+
 async def get_active_run() -> Optional[DevAgentRun]:
     """Return the single non-terminal run to resume, if any (one active run at a time)."""
     pool = await get_pool()
