@@ -874,6 +874,56 @@ async def get_open_actions() -> List[Dict[str, Any]]:
         return [dict(r) async for r in result]
 
 
+async def get_actions_needing_review() -> List[Dict[str, Any]]:
+    """B3: ActionItems P4 gated below JIRA_CONFIDENCE_THRESHOLD — written by
+    mark_action_needs_review but never surfaced anywhere until now."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (a:ActionItem {jira_status: 'needs_review'})
+            RETURN a.id AS id, a.task AS task, a.owner AS owner,
+                   a.confidence AS confidence, a.review_confidence AS review_confidence,
+                   a.priority AS priority, a.jira_status AS jira_status
+            ORDER BY a.confidence ASC
+            """
+        )
+        return [dict(r) async for r in result]
+
+
+async def get_person_reviews() -> List[Dict[str, Any]]:
+    """B3: PersonReview nodes P3 writes for unresolved attendees — held, never dropped,
+    but nothing read them back until now."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (m:Meeting)-[:NEEDS_REVIEW]->(r:PersonReview {status: 'pending'})
+            RETURN r.id AS id, r.name AS name, r.role AS role, r.reason AS reason,
+                   m.title AS meeting_title, m.id AS meeting_id
+            ORDER BY r.created_at DESC
+            """
+        )
+        return [dict(r) async for r in result]
+
+
+async def get_open_blockers() -> List[Dict[str, Any]]:
+    """B3: Blocker nodes P9 writes on a dev-agent run failure — surfaced here for the
+    review queue / dashboard."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (b:Blocker)
+            OPTIONAL MATCH (t:Ticket)-[:RAISES_BLOCKER]->(b)
+            RETURN b.id AS id, b.description AS description, b.raised_by AS raised_by,
+                   t.key AS ticket_key, b.created_at AS created_at
+            ORDER BY b.created_at DESC
+            """
+        )
+        return [dict(r) async for r in result]
+
+
 async def get_influential_nodes(label: str = "Person", limit: int = 10) -> List[Dict[str, Any]]:
     """Return top N nodes by pagerank_score for a given label.
 

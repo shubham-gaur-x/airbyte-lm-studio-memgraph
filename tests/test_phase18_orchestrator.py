@@ -37,18 +37,11 @@ if "openai" not in sys.modules:
     stub.APIConnectionError = Exception  # type: ignore[attr-defined]
     sys.modules["openai"] = stub
 
-# fastapi stubs
-if "fastapi" not in sys.modules:
-    stub = types.ModuleType("fastapi")
-    stub.FastAPI = MagicMock  # type: ignore[attr-defined]
-    stub.APIRouter = MagicMock  # type: ignore[attr-defined]
-    stub.Depends = MagicMock  # type: ignore[attr-defined]
-    sub = types.ModuleType("fastapi.middleware")
-    sub.cors = types.ModuleType("fastapi.middleware.cors")
-    sub.cors.CORSMiddleware = MagicMock  # type: ignore[attr-defined]
-    sys.modules["fastapi"] = stub
-    sys.modules["fastapi.middleware"] = sub
-    sys.modules["fastapi.middleware.cors"] = sub.cors
+# NOTE: fastapi is a real installed dependency in this environment (unlike the packages
+# stubbed above, which historically were not) — do NOT stub it here. A stub module left in
+# sys.modules for the rest of the pytest session shadows the real package for every test
+# file that imports transform_service.main afterwards (e.g. `from fastapi import
+# BackgroundTasks` starts raising ImportError, since the stub never defined it).
 
 from dev_agent.models import ClaudeRunResult, DevAgentRun
 from dev_agent.self_verify import VerifyVerdict

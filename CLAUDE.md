@@ -259,6 +259,10 @@ past bug class, so never derive these ids anywhere else.
   `PersonReview` nodes `(Meeting)-[:NEEDS_REVIEW]->(:PersonReview)` — never silently dropped. `Person.tracked`
   (default false) is the opt-in gate: `get_influential_nodes` only ranks tracked people (governance —
   no per-person leaderboards by default). Roster comes from `PERSON_ROSTER_PATH` (JSON), empty if unset.
+- `GET /review/actions`, `/review/people`, `/review/blockers` (B3) surface the P4 needs_review
+  ActionItems, P3 PersonReview nodes, and P9 Blocker nodes that were written but never read back
+  anywhere — the read side of each gate now exists, in `memgraph_client.get_actions_needing_review` /
+  `get_person_reviews` / `get_open_blockers`.
 - `Decision.confidence` (B2 — the other P4 "dead field" gap) mirrors `ActionItem.confidence`: written by
   `upsert_meeting_graph`, defaulted to 1.0, coerced from a plain string via `ExtractedMeeting`'s
   `_coerce_decisions` validator for backward compatibility. `Fact.confidence` already had real dynamics

@@ -220,6 +220,27 @@ async def actions_open() -> Dict[str, Any]:
     return {"actions": actions, "count": len(actions)}
 
 
+@app.get("/review/actions")
+async def review_actions() -> Dict[str, Any]:
+    """B3: ActionItems P4 gated below JIRA_CONFIDENCE_THRESHOLD (needs_review, no ticket)."""
+    actions = await memgraph_client.get_actions_needing_review()
+    return {"actions": actions, "count": len(actions)}
+
+
+@app.get("/review/people")
+async def review_people() -> Dict[str, Any]:
+    """B3: unresolved attendees P3 held for review instead of silently dropping."""
+    people = await memgraph_client.get_person_reviews()
+    return {"people": people, "count": len(people)}
+
+
+@app.get("/review/blockers")
+async def review_blockers() -> Dict[str, Any]:
+    """B3: open Blocker nodes P9 wrote on dev-agent run failures."""
+    blockers = await memgraph_client.get_open_blockers()
+    return {"blockers": blockers, "count": len(blockers)}
+
+
 @app.get("/meetings/quality")
 async def meetings_quality(limit: int = 20) -> Dict[str, Any]:
     ranked = await memgraph_client.get_meetings_quality_ranked(limit)
