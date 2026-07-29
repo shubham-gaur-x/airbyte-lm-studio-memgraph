@@ -270,6 +270,13 @@ past bug class, so never derive these ids anywhere else.
   review / one_on_one / email_thread / general, derived from real meeting titles) and `prompt_hint()`
   returns type-specific guidance that `graph_builder` passes to `extract_meeting(type_hint=...)`, which
   appends it to the system prompt. Different types produce structurally different action items.
+- `transform_service/transcript_source.py` (P1) is the swappable capture seam (`TranscriptSource`
+  protocol; `DbTranscriptSource` reads `raw_meet_transcripts`). `graph_builder.process_transcript`
+  treats the transcript text as the PRIMARY extraction input (calendar description is fallback only)
+  and is otherwise identical to the email/event path. `transform_service/meet_ingest.py` is the live
+  producer (Google Meet REST fetch + Cloud Pub/Sub PULL — no inbound tunnel; needs GCP creds,
+  disabled no-op without them). Transcript rows are staged via `db.insert_meet_transcript` (SQL only
+  in db.py); a different capture source (notetaker) implements the same seam without touching downstream.
 
 ---
 
@@ -380,6 +387,12 @@ PERSON_ROSTER_PATH=                    # P3: JSON roster for entity resolution (
 
 # Airbyte webhook verification
 AIRBYTE_WEBHOOK_SECRET=
+
+# Google Meet transcript capture (P1 — needs GCP creds; disabled no-op without them)
+GOOGLE_ACCESS_TOKEN=                   # OAuth token with Meet + Pub/Sub scopes
+MEET_PUBSUB_SUBSCRIPTION=              # projects/<p>/subscriptions/<s> (PULL subscription)
+JIRA_DEDUP_ENABLED=true                # P5: dedup recurring action items
+JIRA_DEDUP_THRESHOLD=0.9               # P5: min similarity to treat as a duplicate
 
 # Action Agent (Airbyte Agents SDK — app.airbyte.ai; separate product from
 # the ELT API credentials above)

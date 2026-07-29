@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from transform_service import action_agent, db, episodic_memory, graph_algorithms, meeting_quality, memgraph_client, procedural_memory, semantic_memory, vector_memory
 from transform_service.memory_retrieval import full_memory_query, person_memory_profile
 from transform_service.digest import weekly_digest
-from transform_service.graph_builder import process_new_emails, process_new_events
+from transform_service.graph_builder import process_new_emails, process_new_events, process_new_transcripts
 from transform_service import github_webhook
 from transform_service.jira_agent import process_jira_issues
 from transform_service.models import AirbyteWebhookPayload
@@ -145,6 +145,7 @@ async def webhook_airbyte(
 
     background_tasks.add_task(process_new_emails)
     background_tasks.add_task(process_new_events)
+    background_tasks.add_task(process_new_transcripts)
     background_tasks.add_task(process_jira_issues)
     background_tasks.add_task(action_agent.process_action_items)
 

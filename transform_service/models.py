@@ -80,6 +80,21 @@ class RawCalendarEvent(BaseModel):
     source_table: str = "raw_calendar_events"
 
 
+class RawMeetTranscript(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    source_id: str
+    title: str = ""
+    transcript_text: str = ""
+    conference_record: Optional[str] = None
+    start_time: Optional[str] = None
+    attendees_json: Optional[str] = None
+    calendar_description: Optional[str] = None  # fallback context only (P1)
+    processed: bool = False
+    source_table: str = "raw_meet_transcripts"
+
+
 class RawJiraIssue(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
