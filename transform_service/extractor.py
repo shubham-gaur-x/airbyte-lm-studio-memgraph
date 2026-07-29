@@ -31,7 +31,7 @@ You MUST output ONLY valid JSON matching exactly this schema — no markdown, no
   "attendees": [{"name": "string", "email": "string", "role": "host|attendee|organizer"}],
   "summary": "string — 2-3 sentence summary",
   "topics": ["list of topic strings discussed"],
-  "decisions": ["list of decisions made"],
+  "decisions": [{"text": "decision made", "confidence": 0.0 to 1.0}],
   "action_items": [
     {
       "owner": "person name or email",
@@ -172,6 +172,11 @@ async def extract_meeting(
                 item["is_engineering_task"] = False
             if _is_null_like(item.get("confidence")):
                 item["confidence"] = 1.0
+        # Sanitize decisions (B2) — dict form only; the model's own validator coerces a
+        # plain string entry, so only null-string confidence needs handling here.
+        for decision in data.get("decisions") or []:
+            if isinstance(decision, dict) and _is_null_like(decision.get("confidence")):
+                decision["confidence"] = 1.0
         meeting = ExtractedMeeting.model_validate(data)
     except Exception as exc:
         log.error(

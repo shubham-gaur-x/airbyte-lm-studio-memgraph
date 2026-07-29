@@ -198,20 +198,21 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                 )
 
             # Decision nodes + PRODUCED edges
-            for i, decision_text in enumerate(meeting.decisions):
+            for i, decision in enumerate(meeting.decisions):
                 decision_id = uuid5_id("decision", f"{source_id}:{i}")
                 await tx.run(
                     """
                     MERGE (d:Decision {id: $id})
                     ON CREATE SET d.created_at = $now
-                    SET d.text = $text, d.updated_at = $now
+                    SET d.text = $text, d.confidence = $confidence, d.updated_at = $now
 
                     WITH d
                     MATCH (m:Meeting {id: $meeting_id})
                     MERGE (m)-[:PRODUCED]->(d)
                     """,
                     id=decision_id,
-                    text=decision_text,
+                    text=decision.text,
+                    confidence=decision.confidence,
                     meeting_id=meeting_id,
                     now=now,
                 )
