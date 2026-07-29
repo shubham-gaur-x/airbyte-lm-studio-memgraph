@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from transform_service import action_agent, db, episodic_memory, graph_algorithms, meeting_quality, memgraph_client, procedural_memory, semantic_memory, vector_memory
@@ -192,6 +194,16 @@ async def webhook_github(request: Request, background_tasks: BackgroundTasks) ->
     background_tasks.add_task(github_webhook.handle_event, event, payload)
     log.info("webhook.github.queued", event=event)
     return {"status": "queued", "event": event}
+
+
+_DASHBOARD_PATH = Path(__file__).parent / "static" / "dashboard.html"
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard() -> HTMLResponse:
+    """D: read-only provenance dashboard — timeline, review queues (B3), and the
+    meeting<->ticket provenance traversal (B4) in one self-contained static page."""
+    return HTMLResponse(content=_DASHBOARD_PATH.read_text(encoding="utf-8"))
 
 
 @app.get("/health")

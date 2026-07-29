@@ -259,6 +259,11 @@ past bug class, so never derive these ids anywhere else.
   `PersonReview` nodes `(Meeting)-[:NEEDS_REVIEW]->(:PersonReview)` — never silently dropped. `Person.tracked`
   (default false) is the opt-in gate: `get_influential_nodes` only ranks tracked people (governance —
   no per-person leaderboards by default). Roster comes from `PERSON_ROSTER_PATH` (JSON), empty if unset.
+- `GET /dashboard` (D) serves `transform_service/static/dashboard.html` — a self-contained, vanilla-JS
+  read-only page (Timeline / Review Queue / Provenance Lookup / Insights) consuming the endpoints
+  above. No build step, no external hosts (works with no internet, same as the rest of the pipeline).
+  Governance: the Insights tab's per-person view calls `/graph/insights/influential` (already
+  `tracked`-gated server-side) — never construct a raw per-person ranking client-side.
 - `GET /graph/provenance/{meeting_id}` and `/graph/provenance/by-ticket/{ticket_key}` (B4) are the
   v5 target end-state query made real: one Cypher MATCH per direction returns
   meeting -> decision -> action item -> ticket -> AgentRun -> PR -> files. Row-grouping into the

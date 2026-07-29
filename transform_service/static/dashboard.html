@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Meeting Memory — Provenance Dashboard</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --border: #232838; --text: #e6e9ef;
+    --muted: #8b93a7; --accent: #5b8cff; --good: #35c48f; --warn: #f5a623; --bad: #ef5b5b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7fb; --panel: #ffffff; --border: #e1e4ec; --text: #1a1e29;
+      --muted: #5b6376; --accent: #3861d6; --good: #1f9d6e; --warn: #b8720a; --bad: #c0392b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header { padding: 20px 24px 0; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  nav { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+  nav button {
+    background: none; border: none; color: var(--muted); padding: 10px 14px;
+    cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent;
+  }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { padding: 20px 24px 60px; max-width: 1100px; margin: 0 auto; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto;
+  }
+  .card h3 { margin: 0 0 10px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+  .row { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .row:last-child { border-bottom: none; }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 20px; font-size: 11px; }
+  .badge.good { background: color-mix(in srgb, var(--good) 20%, transparent); color: var(--good); }
+  .badge.warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+  .badge.bad { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
+  input, select, button.action {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 10px; font-size: 13px;
+  }
+  button.action { background: var(--accent); color: white; border: none; cursor: pointer; }
+  .lookup-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tree { font-size: 13px; }
+  .tree ul { list-style: none; margin: 4px 0; padding-left: 18px; border-left: 1px dashed var(--border); }
+  .tree li { margin: 4px 0; }
+  .tree .label { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-right: 6px; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Meeting Memory — Provenance Dashboard</h1>
+  <div class="sub">Read-only. Aggregate-first: per-person rankings respect the tracked opt-in gate.</div>
+</header>
+<nav>
+  <button data-panel="timeline" class="active">Timeline</button>
+  <button data-panel="review">Review Queue</button>
+  <button data-panel="provenance">Provenance Lookup</button>
+  <button data-panel="insights">Insights</button>
+</nav>
+<main>
+
+  <section id="panel-timeline" class="panel active">
+    <div class="lookup-row">
+      <select id="timeline-window">
+        <option value="day">Day</option>
+        <option value="week" selected>Week</option>
+        <option value="month">Month</option>
+      </select>
+      <button class="action" onclick="loadTimeline()">Refresh</button>
+    </div>
+    <div class="grid">
+      <div class="card"><h3>Meetings</h3><div id="timeline-meetings"></div></div>
+      <div class="card"><h3>Decisions</h3><div id="timeline-decisions"></div></div>
+      <div class="card"><h3>Action Items</h3><div id="timeline-actions"></div></div>
+    </div>
+  </section>
+
+  <section id="panel-review" class="panel">
+    <div class="grid">
+      <div class="card"><h3>Needs-Review Action Items (P4)</h3><div id="review-actions"></div></div>
+      <div class="card"><h3>Unresolved People (P3)</h3><div id="review-people"></div></div>
+      <div class="card"><h3>Open Blockers (P9)</h3><div id="review-blockers"></div></div>
+    </div>
+  </section>
+
+  <section id="panel-provenance" class="panel">
+    <div class="lookup-row">
+      <input id="meeting-id-input" placeholder="Meeting id" size="36" />
+      <button class="action" onclick="loadMeetingProvenance()">Trace meeting</button>
+      <input id="ticket-key-input" placeholder="Ticket key (e.g. SCRUM-50)" size="20" />
+      <button class="action" onclick="loadTicketProvenance()">Trace ticket</button>
+    </div>
+    <div class="card"><h3>meeting &rarr; decision &rarr; action item &rarr; ticket &rarr; agent run &rarr; PR &rarr; files</h3>
+      <div id="provenance-tree" class="tree"><div class="empty">Enter a meeting id or ticket key above.</div></div>
+    </div>
+  </section>
+
+  <section id="panel-insights" class="panel">
+    <div class="grid">
+      <div class="card"><h3>Influential People (tracked only)</h3><div id="insights-influential"></div></div>
+      <div class="card"><h3>Weekly Digest</h3><div id="insights-digest"></div></div>
+    </div>
+  </section>
+
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    $('panel-' + btn.dataset.panel).classList.add('active');
+  });
+});
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + ' -> ' + r.status);
+  return r.json();
+}
+
+function esc(s) { return (s ?? '').toString().replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function empty(el, msg) { el.innerHTML = '<div class="empty">' + esc(msg) + '</div>'; }
+function confBadge(c) {
+  if (c === null || c === undefined) return '';
+  const cls = c >= 0.7 ? 'good' : c >= 0.4 ? 'warn' : 'bad';
+  return '<span class="badge ' + cls + '">' + c.toFixed(2) + '</span>';
+}
+
+async function loadTimeline() {
+  const win = $('timeline-window').value;
+  try {
+    const data = await getJSON('/graph/timeline?window=' + win);
+    renderRows($('timeline-meetings'), data.meetings, m => [esc(m.title || m.id), esc(m.date || '')]);
+    renderRows($('timeline-decisions'), data.decisions, d => [esc(d.text), confBadge(d.confidence)]);
+    renderRows($('timeline-actions'), data.action_items, a => [esc(a.task), confBadge(a.confidence)]);
+  } catch (e) { showErr('timeline-meetings', e); }
+}
+
+async function loadReview() {
+  try {
+    const a = await getJSON('/review/actions');
+    renderRows($('review-actions'), a.actions, x => [esc(x.task), confBadge(x.confidence)]);
+  } catch (e) { showErr('review-actions', e); }
+  try {
+    const p = await getJSON('/review/people');
+    renderRows($('review-people'), p.people, x => [esc(x.name), esc(x.reason || '')]);
+  } catch (e) { showErr('review-people', e); }
+  try {
+    const b = await getJSON('/review/blockers');
+    renderRows($('review-blockers'), b.blockers, x => [esc(x.description), esc(x.ticket_key || '')]);
+  } catch (e) { showErr('review-blockers', e); }
+}
+
+async function loadInsights() {
+  try {
+    const inf = await getJSON('/graph/insights/influential?label=Person');
+    renderRows($('insights-influential'), inf, x => [esc(x.name || x.id), (x.pagerank_score || 0).toFixed(3)]);
+  } catch (e) { showErr('insights-influential', e); }
+  try {
+    const dig = await getJSON('/graph/digest/weekly');
+    $('insights-digest').innerHTML = '<pre style="white-space:pre-wrap;margin:0;font-size:12px">' + esc(JSON.stringify(dig, null, 2)) + '</pre>';
+  } catch (e) { showErr('insights-digest', e); }
+}
+
+function renderRows(el, items, fmt) {
+  if (!items || !items.length) { empty(el, 'None'); return; }
+  el.innerHTML = items.map(it => {
+    const [a, b] = fmt(it);
+    return '<div class="row"><span>' + a + '</span><span>' + b + '</span></div>';
+  }).join('');
+}
+
+function showErr(elId, e) { $(elId).innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
+
+function renderTree(data) {
+  const el = $('provenance-tree');
+  if (!data || (!data.meeting && !data.ticket)) { empty(el, 'Not found.'); return; }
+  el.innerHTML = renderNode(data);
+}
+
+function renderNode(data) {
+  let html = '<ul>';
+  if (data.meeting) {
+    html += '<li><span class="label">meeting</span>' + esc(data.meeting.title || data.meeting.id) + '</li>';
+  }
+  if (data.ticket) {
+    html += '<li><span class="label">ticket</span>' + esc(data.ticket.key) + ' — ' + esc(data.ticket.summary || '') + '</li>';
+  }
+  (data.decisions || []).forEach(d => {
+    html += '<li><span class="label">decision</span>' + esc(d.text) + ' ' + confBadge(d.confidence) + '</li>';
+  });
+  (data.meetings || []).forEach(m => {
+    html += '<li><span class="label">meeting</span>' + esc(m.title || m.id) + '</li>';
+  });
+  (data.action_items || []).forEach(a => {
+    html += '<li><span class="label">action</span>' + esc(a.task) + ' ' + confBadge(a.confidence);
+    if (a.ticket) html += '<ul><li><span class="label">ticket</span>' + esc(a.ticket.key) + ' — ' + esc(a.ticket.summary || '') + renderRuns(a.agent_runs) + '</li></ul>';
+    html += '</li>';
+  });
+  if (data.agent_runs && !data.action_items) {
+    html += renderRuns(data.agent_runs);
+  }
+  html += '</ul>';
+  return html;
+}
+
+function renderRuns(runs) {
+  if (!runs || !runs.length) return '';
+  return '<ul>' + runs.map(r => {
+    const v = r.verified === true ? '<span class="badge good">verified</span>'
+            : r.verified === false ? '<span class="badge bad">unverified</span>' : '';
+    let s = '<li><span class="label">agent run</span>attempt ' + esc(r.attempt) + ' — ' + esc(r.status) + ' ' + v;
+    if (r.pull_request) {
+      s += '<ul><li><span class="label">PR</span><a href="' + esc(r.pull_request.url) + '">#' + esc(r.pull_request.number) + '</a>';
+      (r.pull_request.commits || []).forEach(c => {
+        s += '<ul><li><span class="label">commit</span>' + esc((c.sha || '').slice(0, 8)) + ' — ' + esc(c.message || '');
+        if (c.files && c.files.length) {
+          s += '<ul>' + c.files.map(f => '<li>' + esc(f.path) + ' <span class="badge warn">' + esc(f.change_type) + '</span></li>').join('') + '</ul>';
+        }
+        s += '</li></ul>';
+      });
+      s += '</li></ul>';
+    }
+    s += '</li>';
+    return s;
+  }).join('') + '</ul>';
+}
+
+async function loadMeetingProvenance() {
+  const id = $('meeting-id-input').value.trim();
+  if (!id) return;
+  try { renderTree(await getJSON('/graph/provenance/' + encodeURIComponent(id))); }
+  catch (e) { empty($('provenance-tree'), e.message); }
+}
+
+async function loadTicketProvenance() {
+  const key = $('ticket-key-input').value.trim();
+  if (!key) return;
+  try { renderTree(await getJSON('/graph/provenance/by-ticket/' + encodeURIComponent(key))); }
+  catch (e) { empty($('provenance-tree'), e.message); }
+}
+
+loadTimeline();
+loadReview();
+loadInsights();
+</script>
+</body>
+</html>
