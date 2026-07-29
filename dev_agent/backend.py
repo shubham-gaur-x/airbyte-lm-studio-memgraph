@@ -43,12 +43,15 @@ def model_for_run(backend: str) -> Optional[str]:
 
     local  -> the loaded LM Studio model (DEV_AGENT_LM_MODEL)
     hosted -> the LiteLLM alias that routes to the provider
-    claude -> None (use Claude Code's default Anthropic model)
+    claude -> DEV_AGENT_CLAUDE_MODEL if set (cost control), else None (Claude
+              Code's own default Anthropic model)
     """
     if backend in _HOSTED_MODEL_ALIAS:
         return _HOSTED_MODEL_ALIAS[backend]
     if backend == "local":
         return os.environ.get("DEV_AGENT_LM_MODEL", "").strip() or None
+    if backend == "claude":
+        return os.environ.get("DEV_AGENT_CLAUDE_MODEL", "").strip() or None
     return None
 
 

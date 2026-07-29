@@ -80,8 +80,13 @@ class TestModelForRun:
         monkeypatch.setenv("DEV_AGENT_LM_MODEL", "qwen2.5-coder-7b-instruct")
         assert backend.model_for_run("local") == "qwen2.5-coder-7b-instruct"
 
-    def test_claude_returns_none(self):
+    def test_claude_returns_none_by_default(self, monkeypatch):
+        monkeypatch.delenv("DEV_AGENT_CLAUDE_MODEL", raising=False)
         assert backend.model_for_run("claude") is None
+
+    def test_claude_returns_override_when_set(self, monkeypatch):
+        monkeypatch.setenv("DEV_AGENT_CLAUDE_MODEL", "claude-haiku-4-5")
+        assert backend.model_for_run("claude") == "claude-haiku-4-5"
 
 
 class TestGetBackend:
