@@ -94,3 +94,38 @@ async def test_upsert_meeting_graph_retries_on_transient_conflict(monkeypatch):
 
     assert node_id  # succeeded on the retry, not dropped
     assert call_count["n"] == 2  # exactly one retry
+
+
+@pytest.mark.anyio
+async def test_topic_merge_key_is_case_normalized():
+    """Regression: the MERGE key used the raw-case topic name while topic_id already
+    normalized to lowercase+strip, so two case variants of the same topic ('Talend to dbt'
+    vs 'talend to dbt') created two Topic nodes sharing one uuid5 id -- confirmed live,
+    fragmenting a real topic across nodes and understating it in bridge/community/pagerank
+    insight queries, which key off these exact nodes."""
+    tx = AsyncMock()
+    tx.run = AsyncMock()
+    tx.commit = AsyncMock()
+    tx_cm = MagicMock()
+    tx_cm.__aenter__ = AsyncMock(return_value=tx)
+    tx_cm.__aexit__ = AsyncMock(return_value=False)
+    session = MagicMock()
+    session.begin_transaction = AsyncMock(return_value=tx_cm)
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+    driver = MagicMock()
+    driver.session.return_value = session_cm
+
+    meeting = ExtractedMeeting(
+        title="M", kind="meeting", platform="Zoom", date=date(2026, 7, 29), summary="s",
+        topics=["Talend to dbt Conversion Tool"],
+    )
+    with (
+        patch.object(mc, "get_driver", return_value=driver),
+        patch.object(mc, "get_known_people", AsyncMock(return_value=[])),
+    ):
+        await mc.upsert_meeting_graph(meeting, "src-topic-case-1")
+
+    topic_call = next(c for c in tx.run.call_args_list if "MERGE (t:Topic" in c.args[0])
+    assert topic_call.kwargs["name"] == "talend to dbt conversion tool"  # normalized, not raw

@@ -179,9 +179,15 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                     meeting_id=meeting_id, now=now,
                 )
 
-            # Topic nodes + DISCUSSED edges
+            # Topic nodes + DISCUSSED edges. MERGE key is normalized (lowercase+strip) to
+            # match topic_id's existing normalization — using the raw-case name as the
+            # MERGE key here used to create a second Topic node (and a colliding .id, since
+            # two case variants hash to the same uuid5) for every case variant, fragmenting
+            # a single real topic across nodes and understating it in every insight query
+            # (bridges/communities/pagerank all key off these nodes).
             for topic_name in meeting.topics:
-                topic_id = uuid5_id("topic", topic_name.lower().strip())
+                norm_name = topic_name.lower().strip()
+                topic_id = uuid5_id("topic", norm_name)
                 await tx.run(
                     """
                     MERGE (t:Topic {name: $name})
@@ -192,7 +198,7 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                     MATCH (m:Meeting {id: $meeting_id})
                     MERGE (m)-[:DISCUSSED]->(t)
                     """,
-                    name=topic_name,
+                    name=norm_name,
                     topic_id=topic_id,
                     meeting_id=meeting_id,
                     now=now,
@@ -858,7 +864,7 @@ async def get_topic_graph(name: str) -> Dict[str, Any]:
             RETURN t.name AS name,
                    collect(DISTINCT {id: m.id, title: m.title, date: m.date}) AS meetings
             """,
-            name=name,
+            name=name.strip().lower(),  # match the write-side normalization
         )
         records = [dict(r) async for r in result]
         return records[0] if records else {}
