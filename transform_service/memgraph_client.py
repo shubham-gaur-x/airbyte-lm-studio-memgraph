@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Literal, Optional
 import structlog
 from neo4j import AsyncGraphDatabase, AsyncDriver
 
+from transform_service import person_resolver
 from transform_service.models import ExtractedMeeting
 from transform_service.utils import uuid5_id
 
@@ -66,9 +67,29 @@ async def create_indexes() -> None:
     log.info("memgraph.indexes_ready")
 
 
+async def get_known_people() -> List[Dict[str, Any]]:
+    """Return existing Person nodes for P3 probabilistic resolution (email, name, tracked)."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (p:Person) WHERE p.email IS NOT NULL
+            RETURN p.email AS email, p.name AS name, coalesce(p.tracked, false) AS tracked
+            """
+        )
+        return [dict(r) async for r in result]
+
+
 async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str:
     now = datetime.now(timezone.utc).isoformat()
     meeting_id = uuid5_id("meeting", source_id)
+
+    # P3: resolve attendees to canonical people BEFORE writing (deterministic email
+    # normalization + roster, then fuzzy name match; unresolved held for review, never
+    # silently dropped). Reads happen outside the write transaction.
+    roster = person_resolver.load_roster()
+    known_people = await get_known_people()
+    resolved, reviews = person_resolver.resolve_attendees(meeting.attendees, roster, known_people)
 
     driver = get_driver()
     async with driver.session() as session:
@@ -104,19 +125,19 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                 now=now,
             )
 
-            # Person + Organization + ATTENDED + WORKS_AT
-            for attendee in meeting.attendees:
-                if not attendee.email:
-                    continue
-                person_id = uuid5_id("person", attendee.email)
-                domain = attendee.email.split("@")[-1] if "@" in attendee.email else "unknown"
+            # Person + Organization + ATTENDED + WORKS_AT (resolved to canonical people).
+            for res in resolved:
+                email = res.email  # canonical, normalized
+                person_id = uuid5_id("person", email)
+                domain = email.split("@")[-1] if "@" in email else "unknown"
                 org_id = uuid5_id("org", domain)
 
                 await tx.run(
                     """
                     MERGE (p:Person {email: $email})
-                    ON CREATE SET p.created_at = $now
-                    SET p.name = $name, p.id = $person_id, p.updated_at = $now
+                    ON CREATE SET p.created_at = $now, p.tracked = $tracked
+                    SET p.name = $name, p.id = $person_id, p.updated_at = $now,
+                        p.tracked = CASE WHEN $tracked THEN true ELSE coalesce(p.tracked, false) END
 
                     MERGE (o:Organization {domain: $domain})
                     ON CREATE SET o.created_at = $now
@@ -129,14 +150,32 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                     MATCH (m:Meeting {id: $meeting_id})
                     MERGE (p)-[:ATTENDED {role: $role}]->(m)
                     """,
-                    email=attendee.email,
-                    name=attendee.name,
+                    email=email,
+                    name=res.name,
                     person_id=person_id,
+                    tracked=res.tracked,
                     domain=domain,
                     org_id=org_id,
-                    role=attendee.role,
+                    role=res.role,
                     meeting_id=meeting_id,
                     now=now,
+                )
+
+            # Unresolved attendees are HELD for review (never silently dropped).
+            for rev in reviews:
+                review_id = uuid5_id("person-review", f"{source_id}:{rev.name}:{rev.role}")
+                await tx.run(
+                    """
+                    MERGE (r:PersonReview {id: $id})
+                    ON CREATE SET r.created_at = $now
+                    SET r.name = $name, r.role = $role, r.reason = $reason,
+                        r.status = 'pending', r.updated_at = $now
+                    WITH r
+                    MATCH (m:Meeting {id: $meeting_id})
+                    MERGE (m)-[:NEEDS_REVIEW]->(r)
+                    """,
+                    id=review_id, name=rev.name, role=rev.role, reason=rev.reason,
+                    meeting_id=meeting_id, now=now,
                 )
 
             # Topic nodes + DISCUSSED edges
@@ -522,6 +561,7 @@ async def migrate_schema_v5(extractor_version: str = "v5") -> Dict[str, int]:
         "CREATE CONSTRAINT ON (c:Commit) ASSERT c.sha IS UNIQUE",
         "CREATE CONSTRAINT ON (fc:FileChange) ASSERT fc.id IS UNIQUE",
         "CREATE CONSTRAINT ON (b:Blocker) ASSERT b.id IS UNIQUE",
+        "CREATE CONSTRAINT ON (pr:PersonReview) ASSERT pr.id IS UNIQUE",
         "CREATE CONSTRAINT ON (tm:Team) ASSERT tm.name IS UNIQUE",
         "CREATE CONSTRAINT ON (pj:Project) ASSERT pj.key IS UNIQUE",
     ]
@@ -770,13 +810,19 @@ async def get_open_actions() -> List[Dict[str, Any]]:
 
 
 async def get_influential_nodes(label: str = "Person", limit: int = 10) -> List[Dict[str, Any]]:
-    """Return top N nodes by pagerank_score for a given label."""
+    """Return top N nodes by pagerank_score for a given label.
+
+    Governance (P3): per-person rankings are gated behind the ``Person.tracked`` opt-in —
+    an untracked individual is never surfaced in a leaderboard by default. Other labels
+    (Topic, Meeting, ...) are unaffected.
+    """
     driver = get_driver()
+    tracked_gate = "AND coalesce(n.tracked, false) = true" if label == "Person" else ""
     async with driver.session() as session:
         result = await session.run(
             f"""
             MATCH (n:{label})
-            WHERE n.pagerank_score IS NOT NULL
+            WHERE n.pagerank_score IS NOT NULL {tracked_gate}
             RETURN n.id AS id,
                    COALESCE(n.name, n.email, n.name) AS name,
                    n.pagerank_score AS pagerank_score,

@@ -253,6 +253,12 @@ past bug class, so never derive these ids anywhere else.
   `@with_retry`; a JSON parse/validation failure returns None and is NOT retried (deterministic at
   temp 0) after a lenient first-`{...}` salvage. `jira_agent.sync_jira_issue` returns the real match
   result from `memgraph_client.update_action_jira_status` (which now returns a bool).
+- `transform_service/person_resolver.py` (P3) owns entity resolution — email normalization + roster
+  (deterministic) then fuzzy name match (probabilistic). It issues NO Cypher: `upsert_meeting_graph`
+  calls it with `get_known_people()` and writes canonical `Person` nodes; unresolved attendees become
+  `PersonReview` nodes `(Meeting)-[:NEEDS_REVIEW]->(:PersonReview)` — never silently dropped. `Person.tracked`
+  (default false) is the opt-in gate: `get_influential_nodes` only ranks tracked people (governance —
+  no per-person leaderboards by default). Roster comes from `PERSON_ROSTER_PATH` (JSON), empty if unset.
 
 ---
 
