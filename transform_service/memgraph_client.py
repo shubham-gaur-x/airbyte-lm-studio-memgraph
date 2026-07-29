@@ -241,11 +241,17 @@ async def update_action_jira_key(action_id: str, jira_key: str) -> None:
         )
 
 
-async def update_action_jira_status(jira_key: str, status: str) -> None:
+async def update_action_jira_status(jira_key: str, status: str) -> bool:
+    """Update the matching ActionItem's Jira status. Returns True iff a node was matched.
+
+    The read-back loop (jira_agent) needs to know whether the key existed so its
+    matched/unmatched counters mean something — a silent no-op used to be reported as
+    a match. We measure it from the write counters rather than guessing.
+    """
     driver = get_driver()
     done = status.lower() in ("done", "closed", "resolved")
     async with driver.session() as session:
-        await session.run(
+        result = await session.run(
             """
             MATCH (a:ActionItem {jira_key: $jira_key})
             SET a.jira_status = $status, a.done = $done, a.updated_at = $now
@@ -255,6 +261,51 @@ async def update_action_jira_status(jira_key: str, status: str) -> None:
             done=done,
             now=datetime.now(timezone.utc).isoformat(),
         )
+        summary = await result.consume()
+        return summary.counters.properties_set > 0
+
+
+async def merge_blocker(
+    description: str,
+    ticket_key: Optional[str] = None,
+    raised_by: str = "dev-agent",
+) -> str:
+    """MERGE a lightweight Blocker node inline (P9), optionally raised by a Ticket.
+
+    No dedicated extraction pipeline — a Blocker is created wherever it is first
+    referenced. Deterministic id from the normalized text so the same blocker dedupes.
+    Edge vocabulary mirrors Matteo's ontology (a Ticket/DevLog `raises_blocker`).
+    Returns the blocker id, or "" for empty text.
+    """
+    if not description or not description.strip():
+        return ""
+    now = datetime.now(timezone.utc).isoformat()
+    blocker_id = uuid5_id("blocker", description.strip().lower()[:200])
+    driver = get_driver()
+    async with driver.session() as session:
+        async with await session.begin_transaction() as tx:
+            await tx.run(
+                """
+                MERGE (b:Blocker {id: $id})
+                ON CREATE SET b.created_at = $now
+                SET b.description = $desc, b.raised_by = $raised_by, b.updated_at = $now
+                """,
+                id=blocker_id, desc=description[:500], raised_by=raised_by, now=now,
+            )
+            if ticket_key:
+                await tx.run(
+                    """
+                    MATCH (b:Blocker {id: $id})
+                    OPTIONAL MATCH (t:Ticket {key: $key})
+                    FOREACH (_ IN CASE WHEN t IS NOT NULL THEN [1] ELSE [] END |
+                        MERGE (t)-[:RAISES_BLOCKER]->(b)
+                    )
+                    """,
+                    id=blocker_id, key=ticket_key,
+                )
+            await tx.commit()
+    log.info("memgraph.blocker_merged", blocker_id=blocker_id, ticket_key=ticket_key)
+    return blocker_id
 
 
 async def merge_ticket_resolved_by_pr(
@@ -470,6 +521,7 @@ async def migrate_schema_v5(extractor_version: str = "v5") -> Dict[str, int]:
         "CREATE CONSTRAINT ON (run:AgentRun) ASSERT run.id IS UNIQUE",
         "CREATE CONSTRAINT ON (c:Commit) ASSERT c.sha IS UNIQUE",
         "CREATE CONSTRAINT ON (fc:FileChange) ASSERT fc.id IS UNIQUE",
+        "CREATE CONSTRAINT ON (b:Blocker) ASSERT b.id IS UNIQUE",
         "CREATE CONSTRAINT ON (tm:Team) ASSERT tm.name IS UNIQUE",
         "CREATE CONSTRAINT ON (pj:Project) ASSERT pj.key IS UNIQUE",
     ]

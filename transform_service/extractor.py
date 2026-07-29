@@ -54,6 +54,27 @@ is_engineering_task is true only if completing this requires writing or changing
 If information is not present, use null or empty arrays. Never invent information not in the source text."""
 
 
+def _loads_lenient(text: str) -> Optional[Dict[str, Any]]:
+    """Parse JSON, tolerating a model that wraps the object in stray prose.
+
+    Tries a strict parse first, then falls back to the first ``{...}`` span. Returns None
+    if nothing parses (a non-retryable failure at temperature 0)."""
+    text = (text or "").strip()
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        parsed = json.loads(text[start:end + 1])
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 def _get_client() -> openai.AsyncOpenAI:
     global _client
     if _client is None:
@@ -99,8 +120,21 @@ async def extract_meeting(
     duration_ms = int((time.monotonic() - start) * 1000)
     raw = strip_json_fences(response.choices[0].message.content or "")
 
+    # Retry policy (explicit): transient API failures (timeouts, rate limits, 5xx) and
+    # APIConnectionError propagate out of this function and ARE retried by @with_retry.
+    # A JSON parse/validation failure returns None and is deliberately NOT retried —
+    # extraction runs at temperature 0.0, so an identical retry yields identical output.
+    # Instead we salvage the first {...} object before giving up, to tolerate a model
+    # that wraps the JSON in stray prose.
+    data = _loads_lenient(raw)
+    if data is None:
+        log.error(
+            "extractor.parse_failed", source_type=source_type,
+            duration_ms=duration_ms, raw_snippet=raw[:200],
+        )
+        return None
+
     try:
-        data = json.loads(raw)
         ctx = context or {}
         # Fill required fields when LLM returns null
         if not data.get("platform"):
@@ -121,7 +155,7 @@ async def extract_meeting(
         meeting = ExtractedMeeting.model_validate(data)
     except Exception as exc:
         log.error(
-            "extractor.parse_failed",
+            "extractor.validate_failed",
             source_type=source_type,
             duration_ms=duration_ms,
             error=str(exc),

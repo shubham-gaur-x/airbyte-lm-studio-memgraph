@@ -172,6 +172,11 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
             await session_memory.record(
                 detail, outcome="failed", error=reason, raw_notes=result.result_text or "",
             )
+            # P9: surface the blocker as a lightweight graph node (best-effort).
+            try:
+                await memgraph_client.merge_blocker(reason, ticket_key=key)
+            except Exception:
+                bound_log.warning("orchestrator.blocker_write_failed", exc_info=True)
             await jira_client.transition_issue(key, DEV_AGENT_TODO_STATUS())
             return
 

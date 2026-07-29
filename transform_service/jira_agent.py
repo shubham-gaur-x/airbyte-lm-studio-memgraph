@@ -42,15 +42,12 @@ async def process_jira_issues() -> None:
 async def sync_jira_issue(issue: RawJiraIssue) -> bool:
     bound = log.bind(step="sync_jira_issue", jira_key=issue.key, status=issue.status)
 
-    await memgraph_client.update_action_jira_status(issue.key, issue.status)
+    matched = await memgraph_client.update_action_jira_status(issue.key, issue.status)
     await db.mark_processed("raw_jira_issues", issue.id)
 
-    # Determine if we actually matched anything by checking if the key existed
-    # update_action_jira_status silently no-ops if no match — log accordingly
+    # `matched` reflects whether an ActionItem actually carried this jira_key. An
+    # unmatched issue is a Jira ticket with no graph counterpart (e.g. created outside
+    # this pipeline) — real signal, not a match, so the batch counters mean something.
     done = issue.status.lower() in ("done", "closed", "resolved")
-    bound.info(
-        "jira_agent.issue_synced",
-        done=done,
-        matched=True,
-    )
-    return True
+    bound.info("jira_agent.issue_synced", done=done, matched=matched)
+    return matched

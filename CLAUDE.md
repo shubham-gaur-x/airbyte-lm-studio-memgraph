@@ -243,6 +243,16 @@ past bug class, so never derive these ids anywhere else.
   local" (it scores CODE, not meeting data). It MUST NOT block the In Review transition — a low
   score only flags the Jira comment and sets `AgentRun.verified=false`.
 - `dev_agent/github_client.py` owns all dev-agent GitHub REST (now `find_open_pr` + `get_pr_diff`).
+- `dev_agent/session_memory.py` (P7) owns the resumable `AgentMemory` record (Matteo's shape),
+  persisted in `dev_agent_runs.state_payload` (Postgres, keyed by ticket, survives attempts) — NOT
+  the per-attempt `AgentRun` graph node, since the resume read happens before any PR/node exists.
+- `Blocker` (P9) is a lightweight node written ONLY via `memgraph_client.merge_blocker`, created
+  inline where first referenced (no extraction pipeline); edge `(Ticket)-[:RAISES_BLOCKER]->(Blocker)`
+  mirrors Matteo's `raises_blocker`.
+- `extractor.py` retry policy is explicit: transient API errors propagate and ARE retried by
+  `@with_retry`; a JSON parse/validation failure returns None and is NOT retried (deterministic at
+  temp 0) after a lenient first-`{...}` salvage. `jira_agent.sync_jira_issue` returns the real match
+  result from `memgraph_client.update_action_jira_status` (which now returns a bool).
 
 ---
 
