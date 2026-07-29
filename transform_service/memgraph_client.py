@@ -874,6 +874,149 @@ async def get_open_actions() -> List[Dict[str, Any]]:
         return [dict(r) async for r in result]
 
 
+def _group_meeting_provenance(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """B4: fold flat Cypher rows from get_meeting_provenance into the nested
+    meeting -> decisions / action_items[ticket, agent_runs[pull_request[commits[files]]]]
+    shape. Pure — no I/O — so it is unit-testable without a driver."""
+    if not rows:
+        return {"meeting": None, "decisions": [], "action_items": []}
+
+    first = rows[0]
+    meeting = {"id": first["meeting_id"], "title": first["meeting_title"], "date": first.get("meeting_date")}
+    decisions = [dict(d) for d in (first.get("decisions") or []) if d is not None]
+
+    actions: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        aid = row.get("action_id")
+        if aid is None:
+            continue
+        action = actions.setdefault(aid, {
+            "id": aid, "task": row.get("action_task"), "confidence": row.get("action_confidence"),
+            "owner": row.get("action_owner"),
+            "ticket": {"key": row["ticket_key"], "summary": row.get("ticket_summary")} if row.get("ticket_key") else None,
+            "agent_runs": [],
+        })
+        _fold_run(action["agent_runs"], row)
+
+    return {"meeting": meeting, "decisions": decisions, "action_items": list(actions.values())}
+
+
+def _group_ticket_provenance(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """B4: fold flat Cypher rows from get_ticket_provenance (reverse direction, anchored
+    at a Ticket) into ticket -> meetings[] / agent_runs[pull_request[commits[files]]]."""
+    if not rows:
+        return None
+
+    first = rows[0]
+    ticket = {"key": first["ticket_key"], "summary": first.get("ticket_summary")}
+    meetings: Dict[str, Dict[str, Any]] = {}
+    agent_runs: List[Dict[str, Any]] = []
+    for row in rows:
+        if row.get("meeting_id"):
+            meetings.setdefault(row["meeting_id"], {"id": row["meeting_id"], "title": row.get("meeting_title")})
+        _fold_run(agent_runs, row)
+
+    return {"ticket": ticket, "meetings": list(meetings.values()), "agent_runs": agent_runs}
+
+
+def _fold_run(agent_runs: List[Dict[str, Any]], row: Dict[str, Any]) -> None:
+    """Shared row-folding for both traversal directions: dedupe/merge one row's
+    run -> pull_request -> commit -> file chain into an existing agent_runs list."""
+    rid = row.get("run_id")
+    if rid is None:
+        return
+    run = next((r for r in agent_runs if r["id"] == rid), None)
+    if run is None:
+        run = {
+            "id": rid, "attempt": row.get("run_attempt"), "status": row.get("run_status"),
+            "verified": row.get("run_verified"), "pull_request": None,
+        }
+        agent_runs.append(run)
+
+    if row.get("pr_url"):
+        if run["pull_request"] is None:
+            run["pull_request"] = {"url": row["pr_url"], "number": row.get("pr_number"), "commits": []}
+        commits = run["pull_request"]["commits"]
+        sha = row.get("commit_sha")
+        if sha:
+            commit = next((c for c in commits if c["sha"] == sha), None)
+            if commit is None:
+                commit = {"sha": sha, "message": row.get("commit_message"), "files": []}
+                commits.append(commit)
+            path = row.get("file_path")
+            if path and not any(f["path"] == path for f in commit["files"]):
+                commit["files"].append({"path": path, "change_type": row.get("file_change_type")})
+
+
+async def get_meeting_provenance(meeting_id: str) -> Dict[str, Any]:
+    """B4: one-traversal provenance — meeting -> decision -> action item -> ticket ->
+    agent run -> PR -> files, in a single Cypher MATCH. Row-grouping is pure Python
+    (_group_meeting_provenance) so cross-joining independent branches (decisions vs. the
+    action-item chain) stays cheap: decisions are collected to one list before the
+    row-multiplying OPTIONAL MATCH chain, so they're identical (and deduped) on every row.
+    """
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (m:Meeting {id: $meeting_id})
+            OPTIONAL MATCH (m)-[:PRODUCED]->(d:Decision)
+            WITH m, collect(DISTINCT {id: d.id, text: d.text, confidence: d.confidence}) AS decisions
+            OPTIONAL MATCH (m)-[:FOLLOWS_UP]->(a:ActionItem)
+            OPTIONAL MATCH (a)-[:TICKETED_AS]->(t:Ticket)
+            OPTIONAL MATCH (run:AgentRun)-[:IMPLEMENTS]->(t)
+            OPTIONAL MATCH (run)-[:PRODUCED]->(pr:PullRequest)
+            OPTIONAL MATCH (pr)-[:CONTAINS]->(c:Commit)
+            OPTIONAL MATCH (c)-[:MODIFIES]->(fc:FileChange)
+            RETURN m.id AS meeting_id, m.title AS meeting_title, m.date AS meeting_date,
+                   decisions,
+                   a.id AS action_id, a.task AS action_task, a.confidence AS action_confidence,
+                   a.owner AS action_owner,
+                   t.key AS ticket_key, t.summary AS ticket_summary,
+                   run.id AS run_id, run.attempt AS run_attempt, run.status AS run_status,
+                   run.verified AS run_verified,
+                   pr.url AS pr_url, pr.number AS pr_number,
+                   c.sha AS commit_sha, c.message AS commit_message,
+                   fc.path AS file_path, fc.change_type AS file_change_type
+            """,
+            meeting_id=meeting_id,
+        )
+        rows = [dict(r) async for r in result]
+    grouped = _group_meeting_provenance(rows)
+    # collect() on an unmatched Decision still yields one all-null map — drop it here so
+    # a meeting with zero decisions reports [] instead of [{"id": None, ...}].
+    grouped["decisions"] = [d for d in grouped["decisions"] if d.get("id") is not None]
+    return grouped
+
+
+async def get_ticket_provenance(ticket_key: str) -> Optional[Dict[str, Any]]:
+    """B4: the reverse traversal, anchored at a Ticket — ticket -> meetings that raised it
+    -> agent runs that implemented it -> PR -> files. One Cypher MATCH."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (t:Ticket {key: $ticket_key})
+            OPTIONAL MATCH (a:ActionItem)-[:TICKETED_AS]->(t)
+            OPTIONAL MATCH (m:Meeting)-[:FOLLOWS_UP]->(a)
+            OPTIONAL MATCH (run:AgentRun)-[:IMPLEMENTS]->(t)
+            OPTIONAL MATCH (run)-[:PRODUCED]->(pr:PullRequest)
+            OPTIONAL MATCH (pr)-[:CONTAINS]->(c:Commit)
+            OPTIONAL MATCH (c)-[:MODIFIES]->(fc:FileChange)
+            RETURN t.key AS ticket_key, t.summary AS ticket_summary,
+                   m.id AS meeting_id, m.title AS meeting_title,
+                   a.id AS action_id, a.task AS action_task,
+                   run.id AS run_id, run.attempt AS run_attempt, run.status AS run_status,
+                   run.verified AS run_verified,
+                   pr.url AS pr_url, pr.number AS pr_number,
+                   c.sha AS commit_sha, fc.path AS file_path, fc.change_type AS file_change_type
+            """,
+            ticket_key=ticket_key,
+        )
+        rows = [dict(r) async for r in result]
+    return _group_ticket_provenance(rows)
+
+
 async def get_actions_needing_review() -> List[Dict[str, Any]]:
     """B3: ActionItems P4 gated below JIRA_CONFIDENCE_THRESHOLD — written by
     mark_action_needs_review but never surfaced anywhere until now."""

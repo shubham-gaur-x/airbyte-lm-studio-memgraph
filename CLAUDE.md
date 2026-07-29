@@ -259,6 +259,12 @@ past bug class, so never derive these ids anywhere else.
   `PersonReview` nodes `(Meeting)-[:NEEDS_REVIEW]->(:PersonReview)` — never silently dropped. `Person.tracked`
   (default false) is the opt-in gate: `get_influential_nodes` only ranks tracked people (governance —
   no per-person leaderboards by default). Roster comes from `PERSON_ROSTER_PATH` (JSON), empty if unset.
+- `GET /graph/provenance/{meeting_id}` and `/graph/provenance/by-ticket/{ticket_key}` (B4) are the
+  v5 target end-state query made real: one Cypher MATCH per direction returns
+  meeting -> decision -> action item -> ticket -> AgentRun -> PR -> files. Row-grouping into the
+  nested response shape is pure Python (`memgraph_client._group_meeting_provenance` /
+  `_group_ticket_provenance`, unit-tested without a driver) — decisions are collected to one list
+  before the row-multiplying action-item chain so they don't get duplicated per row.
 - `GET /review/actions`, `/review/people`, `/review/blockers` (B3) surface the P4 needs_review
   ActionItems, P3 PersonReview nodes, and P9 Blocker nodes that were written but never read back
   anywhere — the read side of each gate now exists, in `memgraph_client.get_actions_needing_review` /

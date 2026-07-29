@@ -241,6 +241,22 @@ async def review_blockers() -> Dict[str, Any]:
     return {"blockers": blockers, "count": len(blockers)}
 
 
+@app.get("/graph/provenance/{meeting_id}")
+async def graph_provenance(meeting_id: str) -> Dict[str, Any]:
+    """B4: one traversal — meeting -> decision -> action item -> ticket -> agent run ->
+    PR -> files. The dashboard's data layer (v5 target end-state query)."""
+    return await memgraph_client.get_meeting_provenance(meeting_id)
+
+
+@app.get("/graph/provenance/by-ticket/{ticket_key}")
+async def graph_provenance_by_ticket(ticket_key: str) -> Dict[str, Any]:
+    """B4: the reverse traversal, entering from a Jira key instead of a meeting id."""
+    out = await memgraph_client.get_ticket_provenance(ticket_key)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"No ticket found for key {ticket_key!r}")
+    return out
+
+
 @app.get("/meetings/quality")
 async def meetings_quality(limit: int = 20) -> Dict[str, Any]:
     ranked = await memgraph_client.get_meetings_quality_ranked(limit)
