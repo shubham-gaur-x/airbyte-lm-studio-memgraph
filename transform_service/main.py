@@ -192,7 +192,11 @@ async def webhook_github(request: Request, background_tasks: BackgroundTasks) ->
         raise HTTPException(status_code=400, detail="bad json")
 
     background_tasks.add_task(github_webhook.handle_event, event, payload)
-    log.info("webhook.github.queued", event=event)
+    # NOTE: `event=` collides with structlog's own reserved `event` kwarg (the log
+    # message text) and raises TypeError at call time — caught live (v5.1 Phase E) because
+    # every existing test called github_webhook.handle_event directly, never this route
+    # function itself, so a real structlog call was never exercised. Use github_event=.
+    log.info("webhook.github.queued", github_event=event)
     return {"status": "queued", "event": event}
 
 
