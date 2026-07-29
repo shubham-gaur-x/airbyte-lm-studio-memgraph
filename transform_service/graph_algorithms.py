@@ -7,6 +7,7 @@ from __future__ import annotations
 import structlog
 
 from transform_service import memgraph_client
+from transform_service.utils import with_retry
 
 log = structlog.get_logger()
 
@@ -40,7 +41,13 @@ _FULL_ALGORITHMS = [
     ),
     (
         "leiden_community_detection",
-        "CALL igraphalg.community_leiden() YIELD node, community_id SET node.community_id = community_id",
+        # objective_function="modularity" (not the "CPM" default at resolution_parameter=1)
+        # -- CPM at resolution 1 over-fragments a graph this sparse into all-singleton
+        # communities (confirmed live: 308/308 communities of size 1), silently corrupting
+        # every insight endpoint until the next per-meeting run_fast_algorithms() call
+        # (Louvain) happens to overwrite it. This runs on a live nightly schedule.
+        'CALL igraphalg.community_leiden("modularity") YIELD node, community_id '
+        "SET node.community_id = community_id",
     ),
     (
         "betweenness_centrality",
@@ -57,6 +64,15 @@ _FULL_ALGORITHMS = [
 ]
 
 
+@with_retry(max_attempts=2, base_delay=1.0)
+async def _run_one(session, cypher: str) -> None:
+    """One algorithm CALL, retried once on Memgraph's transient write-write conflict
+    (real and reproduced live: a concurrent per-meeting run_fast_algorithms() call can
+    collide with a scheduled run_full_algorithms() writing the same score properties)."""
+    result = await session.run(cypher)
+    await result.consume()
+
+
 async def _run_algorithms(session, algorithms: list[tuple[str, str]]) -> dict[str, str]:
     """Run each algorithm's Cypher and fully consume the result before moving
     to the next one. Consuming is required — the async driver otherwise defers
@@ -65,8 +81,7 @@ async def _run_algorithms(session, algorithms: list[tuple[str, str]]) -> dict[st
     results: dict[str, str] = {}
     for name, cypher in algorithms:
         try:
-            result = await session.run(cypher)
-            await result.consume()
+            await _run_one(session, cypher)
             results[name] = "ok"
         except Exception as exc:
             log.warning("graph_algorithms.algorithm_failed", algorithm=name, error=str(exc))
