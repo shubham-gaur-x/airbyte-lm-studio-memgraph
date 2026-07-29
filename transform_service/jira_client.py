@@ -105,6 +105,50 @@ async def list_eligible_tickets(
     ]
 
 
+def build_sprint_jql(
+    project_key: str,
+    statuses: List[str],
+    require_labels: List[str],
+    skip_labels: List[str],
+) -> str:
+    """Build a sprint-membership JQL for dev-agent triage.
+
+    Candidates are issues in the active sprint (``sprint in openSprints()``) with a
+    matching status and at least one required label (the deliberate ``dev-agent``
+    guardrail), excluding any skip labels. Pure function so it is unit-testable
+    without network.
+    """
+    status_list = ", ".join(f'"{s}"' for s in statuses)
+    jql = f'project = "{project_key}" AND sprint in openSprints() AND status in ({status_list})'
+    if require_labels:
+        jql += " AND labels in (" + ", ".join(f'"{lbl}"' for lbl in require_labels) + ")"
+    if skip_labels:
+        jql += " AND labels not in (" + ", ".join(f'"{lbl}"' for lbl in skip_labels) + ")"
+    jql += " ORDER BY created ASC"
+    return jql
+
+
+@with_retry(max_attempts=3, base_delay=2.0)
+async def list_active_sprint_tickets(
+    project_key: str,
+    statuses: List[str],
+    require_labels: List[str],
+    skip_labels: List[str],
+) -> List[Dict[str, Any]]:
+    """List active-sprint tickets eligible for the dev agent (sprint-membership triage)."""
+    jql = build_sprint_jql(project_key, statuses, require_labels, skip_labels)
+    issues = await search_issues(jql, fields=["key", "summary", "status", "labels"])
+    return [
+        {
+            "key": i["key"],
+            "summary": i["fields"].get("summary", ""),
+            "status": (i["fields"].get("status") or {}).get("name", ""),
+            "labels": i["fields"].get("labels") or [],
+        }
+        for i in issues
+    ]
+
+
 @with_retry(max_attempts=3, base_delay=2.0)
 async def get_issue_detail(key: str) -> Dict[str, Any]:
     encoded_key = quote(key, safe="")

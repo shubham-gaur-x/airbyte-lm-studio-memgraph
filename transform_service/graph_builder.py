@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from typing import List
 
 import structlog
 
-from transform_service import db, episodic_memory, graph_algorithms, memgraph_client, procedural_memory, semantic_memory, vector_memory
+from transform_service import db, episodic_memory, graph_algorithms, meeting_type_router, memgraph_client, procedural_memory, semantic_memory, transcript_source, vector_memory
 from transform_service.classifier import classify
 from transform_service.extractor import extract_meeting
 from transform_service.jira_pusher import push_action_items
-from transform_service.models import RawCalendarEvent, RawEmail
+from transform_service.models import RawCalendarEvent, RawEmail, RawMeetTranscript
 
 log = structlog.get_logger()
 
@@ -29,7 +28,11 @@ async def process_email(email: RawEmail) -> bool:
             return False
 
         bound = bound.bind(step="extract")
-        meeting = await extract_meeting(text, "email")
+        # P6: route to a meeting type and extract with a type-specific prompt.
+        mtype = meeting_type_router.route(email.subject, email.body, source_type="email")
+        meeting = await extract_meeting(
+            text, "email", type_hint=meeting_type_router.prompt_hint(mtype),
+        )
 
         if not meeting:
             bound.warning("graph_builder.extract_failed")
@@ -56,6 +59,7 @@ async def process_email(email: RawEmail) -> bool:
                 log.info("graph_builder.procedures_matched", procedures=matched, meeting_id=node_id)
             await vector_memory.embed_meeting(node_id, meeting.summary)
             await vector_memory.embed_facts_for_meeting(node_id)
+            await vector_memory.embed_action_items_for_meeting(node_id)
         except Exception as exc:
             log.warning("graph_builder.memory_skipped", error=str(exc))
 
@@ -103,9 +107,12 @@ async def process_calendar_event(event: RawCalendarEvent) -> bool:
         bound = bound.bind(step="extract")
         # Pass the event date so extractor can fill it when LLM returns null
         event_date = event.start_time[:10] if event.start_time and len(event.start_time) >= 10 else None
+        # P6: route to a meeting type and extract with a type-specific prompt.
+        mtype = meeting_type_router.route(event.title, event.description or "", source_type="calendar_event")
         meeting = await extract_meeting(
             text, "calendar_event",
             context={"date": event_date, "platform": "google_calendar"},
+            type_hint=meeting_type_router.prompt_hint(mtype),
         )
 
         if not meeting:
@@ -133,6 +140,7 @@ async def process_calendar_event(event: RawCalendarEvent) -> bool:
                 log.info("graph_builder.procedures_matched", procedures=matched, meeting_id=node_id)
             await vector_memory.embed_meeting(node_id, meeting.summary)
             await vector_memory.embed_facts_for_meeting(node_id)
+            await vector_memory.embed_action_items_for_meeting(node_id)
         except Exception as exc:
             log.warning("graph_builder.memory_skipped", error=str(exc))
 
@@ -148,6 +156,94 @@ async def process_calendar_event(event: RawCalendarEvent) -> bool:
             exc_info=True,
         )
         return False
+
+
+async def process_transcript(transcript: RawMeetTranscript) -> bool:
+    """P1: ingest a Google Meet transcript. The transcript text is the PRIMARY input to
+    extraction; the calendar description is fallback context only."""
+    bound = log.bind(source="meet_transcript", source_id=transcript.source_id, step="classify")
+    try:
+        primary = (transcript.transcript_text or "").strip()
+        # Transcript is primary; fall back to calendar description / title only when absent.
+        body = primary or (transcript.calendar_description or "").strip() or transcript.title
+        text = f"{transcript.title}\n\n{body}"
+
+        import json as _json
+        try:
+            attendees_data = _json.loads(transcript.attendees_json) if transcript.attendees_json else []
+        except Exception:
+            attendees_data = []
+        attendees_count = len(attendees_data) if isinstance(attendees_data, list) else 0
+
+        score = classify(text, {"attendees_count": attendees_count, "start_time": transcript.start_time})
+        # A real transcript is strong signal; only skip when there is no transcript AND the
+        # fallback text scores below threshold.
+        if not primary and score < _SCORE_THRESHOLD:
+            bound.info("graph_builder.skipped", score=round(score, 3))
+            await db.mark_processed(transcript.source_table, transcript.id)
+            return False
+
+        bound = bound.bind(step="extract")
+        mtype = meeting_type_router.route(transcript.title, body)
+        event_date = transcript.start_time[:10] if transcript.start_time and len(transcript.start_time) >= 10 else None
+        meeting = await extract_meeting(
+            text, "meeting_transcript",
+            context={"date": event_date, "platform": "google_meet"},
+            type_hint=meeting_type_router.prompt_hint(mtype),
+        )
+        if not meeting:
+            bound.warning("graph_builder.extract_failed")
+            await db.mark_processed(transcript.source_table, transcript.id)
+            return False
+
+        bound = bound.bind(step="graph_write", meeting_title=meeting.title)
+        async with _GRAPH_SEM:
+            node_id = await memgraph_client.upsert_meeting_graph(meeting, transcript.source_id)
+
+        bound = bound.bind(step="jira_push")
+        await push_action_items(meeting.action_items, meeting, transcript.source_id)
+
+        try:
+            await graph_algorithms.run_fast_algorithms()
+            await semantic_memory.extract_facts(meeting, node_id)
+            await semantic_memory.infer_preferences(meeting, node_id)
+            await semantic_memory.strengthen_relationships(meeting, node_id)
+            emails = [a.email for a in meeting.attendees if a.email]
+            await episodic_memory.link_temporal_chain(node_id, str(meeting.date), emails)
+            await episodic_memory.detect_causality(meeting, node_id)
+            matched = await procedural_memory.match_to_procedure(meeting, node_id, emails)
+            if matched:
+                log.info("graph_builder.procedures_matched", procedures=matched, meeting_id=node_id)
+            await vector_memory.embed_meeting(node_id, meeting.summary)
+            await vector_memory.embed_facts_for_meeting(node_id)
+            await vector_memory.embed_action_items_for_meeting(node_id)
+        except Exception as exc:
+            log.warning("graph_builder.memory_skipped", error=str(exc))
+
+        await db.mark_processed(transcript.source_table, transcript.id)
+        bound.info("graph_builder.transcript_processed", score=round(score, 3), node_id=node_id)
+        return True
+
+    except Exception as exc:
+        log.error(
+            "graph_builder.transcript_error",
+            source_id=transcript.source_id, error=str(exc), exc_info=True,
+        )
+        return False
+
+
+async def process_new_transcripts() -> None:
+    transcripts = await transcript_source.default_source.fetch_pending(limit=50)
+    if not transcripts:
+        return
+    results = await asyncio.gather(*[process_transcript(t) for t in transcripts], return_exceptions=True)
+    processed = sum(1 for r in results if r is True)
+    skipped = sum(1 for r in results if r is False)
+    errors = sum(1 for r in results if isinstance(r, Exception))
+    log.info(
+        "graph_builder.batch_transcripts_done",
+        total=len(transcripts), processed=processed, skipped=skipped, errors=errors,
+    )
 
 
 async def process_new_emails() -> None:

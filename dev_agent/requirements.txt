@@ -6,3 +6,5 @@ structlog
 apscheduler
 python-dotenv
 asyncpg
+ruff==0.15.21
+mypy==2.3.0

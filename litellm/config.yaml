@@ -1,0 +1,41 @@
+# LiteLLM proxy config — dev agent free hosted-tier backends (opt-in).
+#
+# Only used when DEV_AGENT_LLM_BACKEND is openrouter|gemini|groq. Claude Code talks the
+# Anthropic protocol (ANTHROPIC_BASE_URL -> this proxy); LiteLLM translates to the chosen
+# provider. Keys come from the environment (all optional; set only the tier you use).
+#
+# This is a working starting point — adjust the concrete model ids to whatever the free
+# tier currently offers before relying on it. The default `local` backend never uses this.
+# Anthropic-only request fields that Claude Code sends but non-Anthropic providers reject
+# (e.g. Groq 400s on `context_management`, its context-editing beta). Dropped per model so
+# the translation to the provider succeeds.
+_anthropic_only_drops: &anthropic_only_drops
+  - context_management
+  - output_config
+  - thinking
+  - mcp_servers
+  - container
+  - betas
+  - anthropic_beta
+
+model_list:
+  - model_name: dev-agent-coder-openrouter
+    litellm_params:
+      model: openrouter/qwen/qwen-2.5-coder-32b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+      additional_drop_params: *anthropic_only_drops
+  - model_name: dev-agent-coder-gemini
+    litellm_params:
+      model: gemini/gemini-2.0-flash
+      api_key: os.environ/GEMINI_API_KEY
+      additional_drop_params: *anthropic_only_drops
+  - model_name: dev-agent-coder-groq
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+      additional_drop_params: *anthropic_only_drops
+
+litellm_settings:
+  drop_params: true
+  # Anthropic-format requests (from Claude Code) are accepted at /v1/messages and
+  # translated to the provider above.

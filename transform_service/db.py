@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import os
 from typing import List, Optional
 
 import asyncpg
 import structlog
 
-from transform_service.models import RawCalendarEvent, RawEmail, RawJiraIssue
+from transform_service.models import RawCalendarEvent, RawEmail, RawJiraIssue, RawMeetTranscript
 
 _pool: Optional[asyncpg.Pool] = None
 log = structlog.get_logger()
@@ -71,6 +70,23 @@ async def create_staging_tables() -> None:
             )
         """)
 
+        # P1: Google Meet transcripts — a first-class raw source, independent of Airbyte
+        # (Airbyte has no Meet-transcript connector). Written by the Pub/Sub-pull consumer.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS raw_meet_transcripts (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                source_id TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                transcript_text TEXT NOT NULL DEFAULT '',
+                conference_record TEXT,
+                start_time TIMESTAMPTZ,
+                attendees_json JSONB,
+                calendar_description TEXT,
+                processed BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
         # Gmail processed-ID tracker (survives Full Refresh re-syncs)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS processed_gmail_ids (
@@ -116,6 +132,51 @@ async def create_staging_tables() -> None:
 async def sync_airbyte_jira_to_staging() -> int:
     """No-op: Airbyte writes directly to raw_jira_issues. We query it natively."""
     return 0
+
+
+async def insert_meet_transcript(
+    source_id: str,
+    title: str,
+    transcript_text: str,
+    conference_record: Optional[str] = None,
+    start_time: Optional[str] = None,
+    attendees_json: Optional[str] = None,
+    calendar_description: Optional[str] = None,
+) -> None:
+    """P1: stage a Google Meet transcript row (called by the Pub/Sub-pull consumer).
+    Idempotent on source_id so a redelivered Pub/Sub message does not duplicate."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO raw_meet_transcripts
+                (source_id, title, transcript_text, conference_record, start_time,
+                 attendees_json, calendar_description)
+            VALUES ($1, $2, $3, $4, $5::timestamptz, $6::jsonb, $7)
+            ON CONFLICT (source_id) DO NOTHING
+            """,
+            source_id, title, transcript_text, conference_record, start_time,
+            attendees_json, calendar_description,
+        )
+
+
+async def get_unprocessed_transcripts(limit: int = 50) -> List[RawMeetTranscript]:
+    """P1: read unprocessed Google Meet transcripts (our own staging table)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id::text AS id, source_id, title, transcript_text, conference_record,
+                   start_time::text AS start_time, attendees_json::text AS attendees_json,
+                   calendar_description
+            FROM raw_meet_transcripts
+            WHERE processed = FALSE
+            ORDER BY created_at
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [RawMeetTranscript(**dict(r)) for r in rows]
 
 
 async def get_unprocessed_emails(limit: int = 50) -> List[RawEmail]:
@@ -334,7 +395,7 @@ async def get_unprocessed_jira_issues(limit: int = 100) -> List[RawJiraIssue]:
 
 
 async def mark_processed(table: str, record_id: str) -> None:
-    allowed = {"raw_emails", "raw_calendar_events", "raw_jira_issues", "raw_gcal_events", "messages_details"}
+    allowed = {"raw_emails", "raw_calendar_events", "raw_jira_issues", "raw_gcal_events", "messages_details", "raw_meet_transcripts"}
     if table not in allowed:
         raise ValueError(f"Unknown table: {table}")
     pool = await get_pool()

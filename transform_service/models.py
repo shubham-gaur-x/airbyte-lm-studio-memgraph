@@ -24,6 +24,9 @@ class ActionItem(BaseModel):
     priority: Literal["high", "medium", "low"] = "medium"
     jira_key: Optional[str] = None
     is_engineering_task: bool = False
+    # P4: per-item extraction confidence. Defaults to 1.0 so items the model does not
+    # score are not gated; the extractor prompt asks for a real 0.0-1.0 value.
+    confidence: float = 1.0
 
 
 class ExtractedMeeting(BaseModel):
@@ -75,6 +78,21 @@ class RawCalendarEvent(BaseModel):
     attendees_json: Optional[str] = None
     processed: bool = False
     source_table: str = "raw_calendar_events"
+
+
+class RawMeetTranscript(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    source_id: str
+    title: str = ""
+    transcript_text: str = ""
+    conference_record: Optional[str] = None
+    start_time: Optional[str] = None
+    attendees_json: Optional[str] = None
+    calendar_description: Optional[str] = None  # fallback context only (P1)
+    processed: bool = False
+    source_table: str = "raw_meet_transcripts"
 
 
 class RawJiraIssue(BaseModel):

@@ -39,7 +39,8 @@ You MUST output ONLY valid JSON matching exactly this schema — no markdown, no
       "due": "YYYY-MM-DD or null",
       "done": false,
       "priority": "high|medium|low",
-      "is_engineering_task": true|false
+      "is_engineering_task": true|false,
+      "confidence": 0.0 to 1.0
     }
   ],
   "key_quotes": ["notable quotes, max 3"],
@@ -52,6 +53,27 @@ You MUST output ONLY valid JSON matching exactly this schema — no markdown, no
 is_engineering_task is true only if completing this requires writing or changing code — not for scheduling, communication, or non-technical follow-ups.
 
 If information is not present, use null or empty arrays. Never invent information not in the source text."""
+
+
+def _loads_lenient(text: str) -> Optional[Dict[str, Any]]:
+    """Parse JSON, tolerating a model that wraps the object in stray prose.
+
+    Tries a strict parse first, then falls back to the first ``{...}`` span. Returns None
+    if nothing parses (a non-retryable failure at temperature 0)."""
+    text = (text or "").strip()
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        parsed = json.loads(text[start:end + 1])
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 def _get_client() -> openai.AsyncOpenAI:
@@ -69,18 +91,23 @@ async def extract_meeting(
     text: str,
     source_type: str,
     context: Optional[Dict[str, Any]] = None,
+    type_hint: Optional[str] = None,
 ) -> Optional[ExtractedMeeting]:
     client = _get_client()
     model = os.environ["LM_STUDIO_MODEL"]
     start = time.monotonic()
 
     user_prompt = f"Extract meeting information from this {source_type}:\n\n{text}"
+    # P6: append meeting-type-specific guidance so extraction fits the meeting type.
+    system_prompt = _SYSTEM_PROMPT
+    if type_hint:
+        system_prompt = f"{_SYSTEM_PROMPT}\n\nMeeting-type guidance:\n{type_hint}"
 
     try:
         response = await client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.0,
@@ -99,8 +126,21 @@ async def extract_meeting(
     duration_ms = int((time.monotonic() - start) * 1000)
     raw = strip_json_fences(response.choices[0].message.content or "")
 
+    # Retry policy (explicit): transient API failures (timeouts, rate limits, 5xx) and
+    # APIConnectionError propagate out of this function and ARE retried by @with_retry.
+    # A JSON parse/validation failure returns None and is deliberately NOT retried —
+    # extraction runs at temperature 0.0, so an identical retry yields identical output.
+    # Instead we salvage the first {...} object before giving up, to tolerate a model
+    # that wraps the JSON in stray prose.
+    data = _loads_lenient(raw)
+    if data is None:
+        log.error(
+            "extractor.parse_failed", source_type=source_type,
+            duration_ms=duration_ms, raw_snippet=raw[:200],
+        )
+        return None
+
     try:
-        data = json.loads(raw)
         ctx = context or {}
         # Fill required fields when LLM returns null
         if not data.get("platform"):
@@ -121,7 +161,7 @@ async def extract_meeting(
         meeting = ExtractedMeeting.model_validate(data)
     except Exception as exc:
         log.error(
-            "extractor.parse_failed",
+            "extractor.validate_failed",
             source_type=source_type,
             duration_ms=duration_ms,
             error=str(exc),

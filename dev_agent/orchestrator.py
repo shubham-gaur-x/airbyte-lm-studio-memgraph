@@ -3,16 +3,17 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from dev_agent import db, git_ops, github_client, claude_runner
+from dev_agent import backend, db, git_ops, github_client, claude_runner, self_verify, session_memory
+from dev_agent.backend import PreflightError
 from dev_agent.models import ClaudeRunResult
-from transform_service import jira_client
+from transform_service import jira_client, memgraph_client
 
 log = structlog.get_logger()
 
@@ -25,17 +26,19 @@ def _env(key: str, default: str = "") -> str:
 
 
 JIRA_PROJECT_KEY = lambda: _env("JIRA_PROJECT_KEY", "SCRUM")
-DEV_AGENT_BACKLOG_STATUS = lambda: _env("DEV_AGENT_BACKLOG_STATUS", "Backlog")
 DEV_AGENT_TODO_STATUS = lambda: _env("DEV_AGENT_TODO_STATUS", "To Do")
 DEV_AGENT_IN_PROGRESS_STATUS = lambda: _env("DEV_AGENT_IN_PROGRESS_STATUS", "In Progress")
 DEV_AGENT_REVIEW_STATUS = lambda: _env("DEV_AGENT_REVIEW_STATUS", "In Review")
-DEV_AGENT_SKIP_LABELS = lambda: [l.strip() for l in _env("DEV_AGENT_SKIP_LABELS", "meeting-action-item").split(",") if l.strip()]
+DEV_AGENT_SKIP_LABELS = lambda: [lbl.strip() for lbl in _env("DEV_AGENT_SKIP_LABELS", "meeting-action-item").split(",") if lbl.strip()]
 DEV_AGENT_POLL_MINUTES = lambda: int(_env("DEV_AGENT_POLL_MINUTES", "10"))
 DEV_AGENT_BATCH_SIZE = lambda: int(_env("DEV_AGENT_BATCH_SIZE", "5"))
 DEV_AGENT_MAX_TURNS = lambda: int(_env("DEV_AGENT_MAX_TURNS", "40"))
 DEV_AGENT_TIMEOUT_SECONDS = lambda: int(_env("DEV_AGENT_TIMEOUT_SECONDS", "1800"))
 DEV_AGENT_MAX_ATTEMPTS = lambda: int(_env("DEV_AGENT_MAX_ATTEMPTS", "1"))
 DEV_AGENT_LM_MODEL = lambda: _env("DEV_AGENT_LM_MODEL") or None
+DEV_AGENT_LLM_BACKEND = lambda: _env("DEV_AGENT_LLM_BACKEND", "local")
+DEV_AGENT_MIN_CONTEXT = lambda: int(_env("DEV_AGENT_MIN_CONTEXT", "32768"))
+DEV_AGENT_REQUIRE_LABELS = lambda: [lbl.strip() for lbl in _env("DEV_AGENT_REQUIRE_LABELS", "dev-agent").split(",") if lbl.strip()]
 GITHUB_OWNER = lambda: _env("GITHUB_OWNER")
 GITHUB_REPO = lambda: _env("GITHUB_REPO")
 GITHUB_TOKEN = lambda: _env("GITHUB_TOKEN")
@@ -47,10 +50,14 @@ WORK_ROOT = lambda: _env("DEV_AGENT_WORK_ROOT", "/work/worktrees")
 # Prompt
 # ---------------------------------------------------------------------------
 
-def build_prompt(ticket: Dict[str, Any]) -> str:
+def build_prompt(ticket: Dict[str, Any], resume_context: Optional[str] = None) -> str:
     key = ticket["key"]
     summary = ticket.get("summary", "")
     description = ticket.get("description", "")
+    resume_block = (
+        f"\nResume context from a previous attempt (use it, do not start over):\n{resume_context}\n"
+        if resume_context else ""
+    )
     return f"""Read CLAUDE.md and follow all conventions in this repository.
 
 Implement the following Jira ticket in full:
@@ -59,7 +66,7 @@ Ticket: {key}
 Summary: {summary}
 Description:
 {description}
-
+{resume_block}
 Instructions:
 - Implement the ticket completely.
 - Run the test suite (pytest / make test if pytest isn't available directly) and confirm it passes before finishing.
@@ -80,30 +87,41 @@ Instructions:
 # Triage
 # ---------------------------------------------------------------------------
 
-async def triage_backlog() -> Dict[str, Any]:
-    candidates = await jira_client.list_eligible_tickets(
-        JIRA_PROJECT_KEY(),
-        [DEV_AGENT_BACKLOG_STATUS()],
-        DEV_AGENT_SKIP_LABELS(),
-        require_description=True,
-    )
-    promoted = 0
-    skipped = 0
-    for ticket in candidates:
-        ok = await jira_client.transition_issue(ticket["key"], DEV_AGENT_TODO_STATUS())
-        if ok:
-            promoted += 1
-            log.info("orchestrator.triage.promoted", key=ticket["key"])
-        else:
-            skipped += 1
+async def find_sprint_candidates() -> list[Dict[str, Any]]:
+    """Eligible tickets: in the active sprint, status To Do, labelled for the agent.
 
-    log.info(
-        "orchestrator.triage.done",
-        considered=len(candidates),
-        promoted=promoted,
-        skipped=skipped,
+    There is no Backlog status in the workflow (verified live), so triage is
+    sprint-membership based. Only tickets a human has put in the sprint AND
+    labelled ``dev-agent`` are eligible — a deliberate guardrail.
+
+    P4: a second, independent confidence gate. If the ticket traces to an extracted
+    ActionItem whose confidence is below DEV_AGENT_CONFIDENCE_THRESHOLD, it is held back
+    from autonomous coding even though it is labelled — we do not rely on the label alone.
+    A ticket with no linked ActionItem (e.g. human-authored) passes this gate.
+    """
+    candidates = await jira_client.list_active_sprint_tickets(
+        JIRA_PROJECT_KEY(),
+        [DEV_AGENT_TODO_STATUS()],
+        DEV_AGENT_REQUIRE_LABELS(),
+        DEV_AGENT_SKIP_LABELS(),
     )
-    return {"considered": len(candidates), "promoted": promoted, "skipped": skipped}
+    threshold = float(_env("DEV_AGENT_CONFIDENCE_THRESHOLD", "0.6"))
+    eligible = []
+    for ticket in candidates:
+        conf = await memgraph_client.get_action_confidence(ticket["key"])
+        if conf is not None and conf < threshold:
+            log.info("orchestrator.triage.low_confidence_skip", key=ticket["key"], confidence=round(conf, 2))
+            continue
+        eligible.append(ticket)
+    return eligible
+
+
+async def triage() -> Dict[str, Any]:
+    """Report the eligible sprint candidates (no state change — the poll claims them)."""
+    candidates = await find_sprint_candidates()
+    log.info("orchestrator.triage.done", eligible=len(candidates),
+             keys=[c["key"] for c in candidates])
+    return {"eligible": len(candidates), "keys": [c["key"] for c in candidates]}
 
 
 # ---------------------------------------------------------------------------
@@ -121,53 +139,130 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
         ok = await jira_client.transition_issue(key, DEV_AGENT_IN_PROGRESS_STATUS())
         if not ok:
             bound_log.warning("orchestrator.in_progress_transition_failed", key=key)
+        await jira_client.add_comment(key, f"Picked up by dev_agent (backend={DEV_AGENT_LLM_BACKEND()}).")
 
         detail = await jira_client.get_issue_detail(key)
         work_dir = f"{WORK_ROOT()}/{key}"
 
         await git_ops.create_worktree(REPO_DIR(), work_dir, branch_name)
-        prompt = build_prompt(detail)
+        # P7: on a retry, feed the prior attempt's resume context instead of starting cold.
+        resume_context = await session_memory.load_resume_context(key)
+        prompt = build_prompt(detail, resume_context=resume_context)
 
         result: ClaudeRunResult = await claude_runner.run_claude_code(
             work_dir,
             prompt,
             timeout_seconds=DEV_AGENT_TIMEOUT_SECONDS(),
             max_turns=DEV_AGENT_MAX_TURNS(),
-            model=DEV_AGENT_LM_MODEL(),
+            model=backend.model_for_run(DEV_AGENT_LLM_BACKEND()),
         )
 
-        if not result.success:
-            bound_log.error("orchestrator.claude_failed", error=result.result_text[:200])
-            await db.finish_run(key, "failed", error=result.result_text[:2000])
-            reason = result.result_text.strip()[:500] or "no error detail captured"
-            await jira_client.add_comment(
-                key,
-                f"Dev agent could not complete this ticket automatically. Needs human follow-up.\n\nError: {reason}",
-            )
-            await jira_client.transition_issue(key, DEV_AGENT_TODO_STATUS())
-            return
-
+        # Check for a PR *regardless* of the success flag. A run can push a branch and
+        # open a PR and then still report failure (e.g. it hits the turn limit on the
+        # verification step afterwards — the live SCRUM-50 failure mode). Dropping that
+        # PR and reverting the ticket to TO DO loses good work, so the PR check gates the
+        # outcome, not `result.success`.
         pr = await github_client.find_open_pr(GITHUB_OWNER(), GITHUB_REPO(), branch_name)
+
         if pr is None:
-            error_msg = "claude_code reported success but no PR was found for this branch"
-            bound_log.error("orchestrator.pr_not_found")
-            await db.finish_run(key, "failed", error=error_msg)
-            await jira_client.add_comment(key, f"Dev agent reported success but no PR was found. Needs human follow-up.")
+            # No PR produced — a genuine failure whichever way the run reported.
+            reason = (result.result_text or "").strip()[:500] or "no error detail captured"
+            if result.success:
+                bound_log.error("orchestrator.pr_not_found")
+                await db.finish_run(key, "failed", error="reported success but no PR was found")
+                await jira_client.add_comment(
+                    key, "Dev agent reported success but no PR was found. Needs human follow-up."
+                )
+            else:
+                bound_log.error("orchestrator.claude_failed", error=result.result_text[:200])
+                await db.finish_run(key, "failed", error=result.result_text[:2000])
+                await jira_client.add_comment(
+                    key,
+                    "Dev agent could not complete this ticket automatically. Needs human "
+                    f"follow-up.\n\nError: {reason}",
+                )
+            # P7: record a resumable session memory even on failure (no PR) so a retry
+            # continues from here instead of cold.
+            await session_memory.record(
+                detail, outcome="failed", error=reason, raw_notes=result.result_text or "",
+            )
+            # P9: surface the blocker as a lightweight graph node (best-effort).
+            try:
+                await memgraph_client.merge_blocker(reason, ticket_key=key)
+            except Exception:
+                bound_log.warning("orchestrator.blocker_write_failed", exc_info=True)
             await jira_client.transition_issue(key, DEV_AGENT_TODO_STATUS())
             return
 
-        await jira_client.add_comment(key, f"Implemented automatically. PR: {pr['html_url']}")
+        # A PR exists. Self-verify the diff against the ticket intent (P8) — a cheap scoring
+        # pass through the SAME backend. It never blocks review: a low score only flags the
+        # comment and sets AgentRun.verified=false. Non-fatal.
+        verdict = None
+        diff = ""
+        try:
+            diff = await github_client.get_pr_diff(GITHUB_OWNER(), GITHUB_REPO(), pr["number"])
+            verdict = await self_verify.verify_pr(
+                ticket, diff, model=backend.model_for_run(DEV_AGENT_LLM_BACKEND())
+            )
+        except Exception:
+            bound_log.warning("orchestrator.self_verify_failed", exc_info=True)
+        verified = verdict.passed if (verdict and verdict.checked) else None
+
+        # Record provenance at the same point we record the dev_agent_runs row, so the run
+        # is reachable in one traversal (P2). Non-fatal: a graph hiccup must not lose the
+        # PR link or block the Jira transition.
+        run = await db.get_run(key)
+        attempt = run.attempt_count if run and run.attempt_count else 1
+        try:
+            await memgraph_client.write_run_provenance(
+                ticket_key=key, attempt=attempt, pr_url=pr["html_url"],
+                pr_number=pr.get("number"), branch=branch_name,
+                ticket_summary=ticket.get("summary", ""), status="pr_opened",
+                verified=verified,
+            )
+        except Exception:
+            bound_log.warning("orchestrator.provenance_write_failed", exc_info=True)
+
+        # Compose the Jira comment: did the run finish + did the automated check confirm it.
+        base = (
+            "Implemented automatically." if result.success
+            else "PR opened, but the agent's run ended early (e.g. turn limit) before finishing."
+        )
+        if verdict and verdict.checked and not verdict.passed:
+            flag = (
+                " Automated check could NOT confirm the diff addresses the ticket "
+                f"(confidence {verdict.confidence:.2f}: {verdict.reason}) — review carefully."
+            )
+        elif verdict and verdict.passed:
+            flag = " Automated check: the diff appears to address the ticket."
+        else:
+            flag = ""
+        await jira_client.add_comment(key, f"{base}{flag} PR: {pr['html_url']}")
+
         ok = await jira_client.transition_issue(key, DEV_AGENT_REVIEW_STATUS())
         if not ok:
             bound_log.warning("orchestrator.review_transition_failed", key=key)
 
         await db.finish_run(key, "pr_opened", pr_url=pr["html_url"], pr_number=pr["number"])
-        bound_log.info("orchestrator.ticket_done", pr_url=pr["html_url"])
+        # P7: record the session memory (files changed pulled from the PR diff).
+        await session_memory.record(
+            detail, outcome="pr_opened", pr=pr,
+            files_changed=session_memory.files_from_diff(diff),
+            verdict=verdict, raw_notes=result.result_text or "",
+        )
+        bound_log.info(
+            "orchestrator.ticket_done", pr_url=pr["html_url"],
+            run_success=result.success, verified=verified,
+        )
 
     except Exception as exc:
         bound_log.error("orchestrator.unexpected_error", exc_info=True)
         try:
             await db.finish_run(key, "failed", error=str(exc))
+        except Exception:
+            pass
+        try:
+            await session_memory.record(ticket, outcome="failed", error=str(exc))
         except Exception:
             pass
         try:
@@ -186,9 +281,16 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
 async def poll_and_process() -> None:
     log.info("orchestrator.poll.start")
 
-    # Triage is pure Jira API — it doesn't need the repo, so it must not be
-    # blocked by a git failure. It runs first and unconditionally.
-    await triage_backlog()
+    # Preflight the selected LLM backend before touching Jira/git. A misconfigured
+    # or unloaded LM Studio fails fast here with an actionable message instead of
+    # burning a ticket on a doomed run.
+    try:
+        detail = await backend.preflight(DEV_AGENT_LLM_BACKEND(), DEV_AGENT_MIN_CONTEXT())
+        log.info("orchestrator.poll.preflight_ok", backend=DEV_AGENT_LLM_BACKEND(), detail=detail)
+    except PreflightError as exc:
+        log.error("orchestrator.poll.preflight_failed", error=str(exc))
+        log.info("orchestrator.poll.done", attempted=0, reason="preflight_failed")
+        return
 
     try:
         await git_ops.ensure_repo_cloned(REPO_DIR(), GITHUB_OWNER(), GITHUB_REPO(), GITHUB_TOKEN())
@@ -197,11 +299,7 @@ async def poll_and_process() -> None:
         log.info("orchestrator.poll.done", attempted=0, reason="repo_unavailable")
         return
 
-    tickets = await jira_client.list_eligible_tickets(
-        JIRA_PROJECT_KEY(),
-        [DEV_AGENT_TODO_STATUS()],
-        DEV_AGENT_SKIP_LABELS(),
-    )
+    tickets = await find_sprint_candidates()
 
     eligible = []
     for ticket in tickets:
@@ -273,8 +371,19 @@ async def trigger_ticket(ticket_key: str):
 
 @app.post("/triage")
 async def trigger_triage():
-    result = await triage_backlog()
+    result = await triage()
     return result
+
+
+@app.get("/preflight")
+async def check_preflight():
+    """Report whether the selected LLM backend is ready to run."""
+    backend_name = DEV_AGENT_LLM_BACKEND()
+    try:
+        detail = await backend.preflight(backend_name, DEV_AGENT_MIN_CONTEXT())
+        return {"backend": backend_name, "ready": True, "detail": detail}
+    except PreflightError as exc:
+        return {"backend": backend_name, "ready": False, "detail": str(exc)}
 
 
 @app.get("/runs")

@@ -112,7 +112,7 @@ client = openai.AsyncOpenAI(
 )
 ```
 
-DO NOT use Ollama. DO NOT use Groq. DO NOT use any cloud LLM.
+DO NOT use Ollama. For extraction, DO NOT use Groq or any cloud LLM — extraction is always local. (Only the dev agent's coding backend is separately toggleable via `DEV_AGENT_LLM_BACKEND`; that never touches extractor.py.)
 
 ---
 
@@ -187,7 +187,7 @@ This is the bidirectional flow — not just writing TO Jira, but also reading FR
 1. **Triage (BACKLOG → TO DO):** Promotes any ticket in BACKLOG that has a non-empty description and no `meeting-action-item` label. No human selects which tickets get worked — this gate is fully autonomous.
 2. **Implement (TO DO → IN PROGRESS → IN REVIEW):** For each eligible TO DO ticket, transitions it to IN PROGRESS, creates a git worktree on branch `agent/<KEY>`, runs headless Claude Code against the ticket description, independently verifies a PR was opened, then transitions to IN REVIEW and posts the PR link as a Jira comment.
 
-**Runs entirely on LM Studio — no Anthropic API key, no exception to the no-cloud-LLM rule.** Claude Code is pointed at LM Studio's native Anthropic-compatible endpoint (`LM_STUDIO_ANTHROPIC_URL`). `ANTHROPIC_API_KEY` is explicitly set to empty in the subprocess env so a key in the parent environment can never accidentally route traffic to api.anthropic.com.
+**Default backend is local LM Studio at zero cost — this is the demo path and the repo default.** Claude Code is pointed at LM Studio's native Anthropic-compatible endpoint (`LM_STUDIO_ANTHROPIC_URL`), and in local mode `ANTHROPIC_API_KEY` is explicitly emptied in the subprocess env so a key in the parent environment can never accidentally route traffic to api.anthropic.com. **A sanctioned, env-gated backend toggle (`DEV_AGENT_LLM_BACKEND`, default `local`) lets other users of this repo switch the dev agent's *coding* work to a hosted model** — real Anthropic Claude (`=claude`) or a free hosted tier (`=openrouter|gemini|groq`) — when they explicitly opt in and supply a key. The exception applies ONLY to dev-agent code implementation; meeting-data extraction stays local always. Local stays the default so the "fully local" demo story and privacy claim hold out of the box.
 
 **The one remaining human checkpoint is merging the PR.** Auto-merge is explicitly NOT implemented in these phases. Do not add it without an explicit go-ahead.
 
@@ -216,6 +216,67 @@ All nodes MUST have `created_at` (ISO datetime) property set on MERGE.
 
 All nodes have: `id` (uuid5, deterministic) · `created_at` (ISO datetime) · `updated_at`
 Meetings additionally have: `date` · `title` · `kind` · `platform` · `duration_minutes`
+
+### Provenance layer (v5 / Phase 34 — dev-agent → graph)
+
+**Node types:** Ticket · PullRequest · AgentRun (· Commit · FileChange from the GitHub webhook)
+**Edge types:** TICKETED_AS (ActionItem→Ticket) · IMPLEMENTS (AgentRun→Ticket) · PRODUCED (AgentRun→PullRequest) · FOLLOWS_UP_ON (AgentRun→Meeting) · RESOLVED_BY (Ticket→PullRequest, on merge)
+
+`AgentRun` is the "implementation session" bridge node (a dev-agent run). The edge
+vocabulary is deliberately **aligned with Matteo's engagement ontology** (`~/Desktop/ontology`:
+his DevLog `implements` a Feature and `follows_up_on` a Meeting) so our Memgraph graph is
+legible to anyone who knows that ontology. One traversal returns
+`meeting → action item → ticket → agent run → PR`.
+
+Provenance nodes/edges are written ONLY via `memgraph_client.write_run_provenance`
+(run outcome), `memgraph_client.merge_ticket_resolved_by_pr` (merge event), and
+`memgraph_client.write_commits_and_files` (push). Node ids are re-derived to match
+`dev_agent/lifecycle.py` exactly (run=uuid5("dev-agent-run", "KEY#attempt"),
+ticket=uuid5("ticket", key), pr=uuid5("pullrequest", url)) — writer/reader id drift is a known
+past bug class, so never derive these ids anywhere else.
+
+- `transform_service/github_webhook.py` owns GitHub webhook PARSING only — it dispatches to
+  `memgraph_client` and issues no Cypher and no GitHub REST itself. The `/webhook/github`
+  receiver in `main.py` mirrors `/webhook/airbyte`. Join key = the `agent/<KEY>` branch.
+- `dev_agent/self_verify.py` (P8) scores a PR diff against the ticket via `claude_runner.run_oneshot`
+  through the SAME dev-agent backend. This is a sanctioned exception to "extraction is always
+  local" (it scores CODE, not meeting data). It MUST NOT block the In Review transition — a low
+  score only flags the Jira comment and sets `AgentRun.verified=false`.
+- `dev_agent/github_client.py` owns all dev-agent GitHub REST (now `find_open_pr` + `get_pr_diff`).
+- `dev_agent/session_memory.py` (P7) owns the resumable `AgentMemory` record (Matteo's shape),
+  persisted in `dev_agent_runs.state_payload` (Postgres, keyed by ticket, survives attempts) — NOT
+  the per-attempt `AgentRun` graph node, since the resume read happens before any PR/node exists.
+- `Blocker` (P9) is a lightweight node written ONLY via `memgraph_client.merge_blocker`, created
+  inline where first referenced (no extraction pipeline); edge `(Ticket)-[:RAISES_BLOCKER]->(Blocker)`
+  mirrors Matteo's `raises_blocker`.
+- `extractor.py` retry policy is explicit: transient API errors propagate and ARE retried by
+  `@with_retry`; a JSON parse/validation failure returns None and is NOT retried (deterministic at
+  temp 0) after a lenient first-`{...}` salvage. `jira_agent.sync_jira_issue` returns the real match
+  result from `memgraph_client.update_action_jira_status` (which now returns a bool).
+- `transform_service/person_resolver.py` (P3) owns entity resolution — email normalization + roster
+  (deterministic) then fuzzy name match (probabilistic). It issues NO Cypher: `upsert_meeting_graph`
+  calls it with `get_known_people()` and writes canonical `Person` nodes; unresolved attendees become
+  `PersonReview` nodes `(Meeting)-[:NEEDS_REVIEW]->(:PersonReview)` — never silently dropped. `Person.tracked`
+  (default false) is the opt-in gate: `get_influential_nodes` only ranks tracked people (governance —
+  no per-person leaderboards by default). Roster comes from `PERSON_ROSTER_PATH` (JSON), empty if unset.
+- `transform_service/dedup.py` (P5) owns the pure dedup *decision* (embedding cosine, text-ratio
+  fallback) — no I/O. `vector_memory` now also embeds `ActionItem` nodes
+  (`embed_action_items_for_meeting`). `jira_pusher._find_duplicate` uses
+  `memgraph_client.get_open_actions_for_owner` + `dedup.best_match`; on a match above
+  `JIRA_DEDUP_THRESHOLD` it links `(existing ActionItem)-[:MENTIONED_IN]->(new Meeting)` and comments
+  on the existing ticket instead of opening a duplicate (gated by `JIRA_DEDUP_ENABLED`, default true).
+- `transform_service/meeting_type_router.py` (P6) is a cheap rules-based step between `classify()`
+  (the "worth processing" gate) and `extract_meeting()`. `route()` picks a type (standup / planning /
+  review / one_on_one / email_thread / general, derived from real meeting titles) and `prompt_hint()`
+  returns type-specific guidance that `graph_builder` passes to `extract_meeting(type_hint=...)`, which
+  appends it to the system prompt. Different types produce structurally different action items.
+- `transform_service/transcript_source.py` (P1) is the swappable capture seam (`TranscriptSource`
+  protocol; `DbTranscriptSource` reads `raw_meet_transcripts`). `graph_builder.process_transcript`
+  treats the transcript text as the PRIMARY extraction input (calendar description is fallback only)
+  and is otherwise identical to the email/event path. `transform_service/meet_ingest.py` is the live
+  producer (Google Meet REST fetch + Cloud Pub/Sub PULL — no inbound tunnel; needs GCP creds,
+  disabled no-op without them). Transcript rows are staged via `db.insert_meet_transcript` (SQL only
+  in db.py); a different capture source (notetaker) implements the same seam without touching downstream.
 
 ---
 
@@ -268,7 +329,7 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
 ## Absolute Rules — Do NOT Violate
 
 - DO NOT use Ollama (replaced by LM Studio)
-- DO NOT use Groq or any cloud LLM API
+- DO NOT route meeting-data extraction (`extractor.py` + memory modules) through Groq or any cloud LLM — extraction is ALWAYS local LM Studio, no exceptions. (The dev agent's *coding* backend is the one sanctioned, env-gated, opt-in exception — see the `DEV_AGENT_LLM_BACKEND` note below; it never touches extraction.)
 - DO NOT use Render, Railway, or any cloud deployment
 - DO NOT use Memgraph Cloud (use local Docker Memgraph)
 - DO NOT use Neon Postgres (use local Docker Postgres)
@@ -279,7 +340,7 @@ Meetings additionally have: `date` · `title` · `kind` · `platform` · `durati
 - DO NOT hardcode any secret or API key in source code
 - DO NOT put Cypher outside `memgraph_client.py`
 - DO NOT put SQL outside `db.py` (or `dev_agent/db.py` for the dev agent's own table)
-- DO NOT call `api.anthropic.com` from `dev_agent` — LM Studio only (no Anthropic API key)
+- DO NOT let `dev_agent` reach a hosted LLM UNLESS `DEV_AGENT_LLM_BACKEND` is explicitly set to a hosted value. Default is `local` (LM Studio, `ANTHROPIC_API_KEY` emptied). `DEV_AGENT_LLM_BACKEND=claude` (or a free hosted tier) is a sanctioned opt-in for other users of this repo, applying ONLY to dev-agent code implementation — never to extraction/meeting data. In local mode, api.anthropic.com must remain unreachable (empty key).
 - DO NOT auto-merge PRs opened by the dev agent — human review is the one remaining checkpoint; do not jump ahead of it
 - DO NOT put Jira REST calls outside `jira_client.py` (applies to `dev_agent` and `transform_service` alike)
 - DO NOT use the Airbyte Agent SDK outside `action_agent.py`
@@ -321,9 +382,17 @@ JIRA_API_TOKEN=
 JIRA_PROJECT_KEY=SCRUM
 JIRA_BOARD_ID=1
 JIRA_ISSUE_TYPE=Task
+JIRA_CONFIDENCE_THRESHOLD=0.6          # P4: ActionItems below this become needs_review, not a ticket
+PERSON_ROSTER_PATH=                    # P3: JSON roster for entity resolution (empty = none)
 
 # Airbyte webhook verification
 AIRBYTE_WEBHOOK_SECRET=
+
+# Google Meet transcript capture (P1 — needs GCP creds; disabled no-op without them)
+GOOGLE_ACCESS_TOKEN=                   # OAuth token with Meet + Pub/Sub scopes
+MEET_PUBSUB_SUBSCRIPTION=              # projects/<p>/subscriptions/<s> (PULL subscription)
+JIRA_DEDUP_ENABLED=true                # P5: dedup recurring action items
+JIRA_DEDUP_THRESHOLD=0.9               # P5: min similarity to treat as a duplicate
 
 # Action Agent (Airbyte Agents SDK — app.airbyte.ai; separate product from
 # the ELT API credentials above)
@@ -342,8 +411,23 @@ GITHUB_TOKEN=
 GITHUB_OWNER=shubham-gaur-x
 GITHUB_REPO=airbyte-lm-studio-memgraph
 LM_STUDIO_ANTHROPIC_URL=http://host.docker.internal:1234
-DEV_AGENT_LM_MODEL=gemma3-12b
-DEV_AGENT_BACKLOG_STATUS=Backlog
+# Coding-backend toggle. Default local (LM Studio, $0). Hosted values are an opt-in
+# exception for other users and apply ONLY to dev-agent code work, never to extraction.
+DEV_AGENT_LLM_BACKEND=local            # local | claude | openrouter | gemini | groq
+DEV_AGENT_MIN_CONTEXT=32768            # preflight fails fast below this
+ANTHROPIC_API_KEY=                     # required only when DEV_AGENT_LLM_BACKEND=claude
+DEV_AGENT_CLAUDE_MODEL=                # optional, DEV_AGENT_LLM_BACKEND=claude: pin the
+                                       # Anthropic model for cost control (e.g. claude-haiku-4-5).
+                                       # Empty = Claude Code's own default model.
+DEV_AGENT_CONFIDENCE_THRESHOLD=0.6     # P4: skip autonomous pickup of low-confidence ActionItems
+DEV_AGENT_VERIFY_THRESHOLD=0.6         # P8 self-verify: min confidence to count as "addresses ticket"
+DEV_AGENT_VERIFY_TIMEOUT_SECONDS=180   # P8 self-verify: one-shot scoring call timeout
+GITHUB_WEBHOOK_SECRET=                 # P2 /webhook/github HMAC secret (unset = accept, dev only)
+OPENROUTER_API_KEY=                    # optional, DEV_AGENT_LLM_BACKEND=openrouter
+GEMINI_API_KEY=                        # optional, DEV_AGENT_LLM_BACKEND=gemini
+GROQ_API_KEY=                          # optional, DEV_AGENT_LLM_BACKEND=groq
+DEV_AGENT_LM_MODEL=qwen2.5-coder-7b-instruct   # local coder model, loaded in LM Studio at 32k ctx (gemma3-12b stays for extraction)
+DEV_AGENT_BACKLOG_STATUS=Backlog       # OBSOLETE once triage is sprint-based (Phase 28)
 DEV_AGENT_TODO_STATUS=To Do
 DEV_AGENT_IN_PROGRESS_STATUS=In Progress
 DEV_AGENT_REVIEW_STATUS=In Review

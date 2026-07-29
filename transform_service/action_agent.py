@@ -35,7 +35,7 @@ def _make_connector() -> JiraConnector:
     AIRBYTE_CLIENT_ID/SECRET, which belong to the Airbyte Cloud ELT API here.
     """
     return JiraConnector(
-        auth_config=AirbyteAuthConfig(
+        auth_config=AirbyteAuthConfig(  # type: ignore[call-arg]  # workspace_name/organization_id resolved from env by the SDK
             airbyte_client_id=os.environ["AIRBYTE_AGENTS_CLIENT_ID"],
             airbyte_client_secret=os.environ["AIRBYTE_AGENTS_CLIENT_SECRET"],
             connector_id=os.environ["AIRBYTE_AGENTS_CONNECTOR_ID"],
@@ -201,7 +201,7 @@ async def post_draft(
     """Post the drafted deliverable as a marker-prefixed comment."""
     await jira.issue_comments.create(
         issue_id_or_key=issue_key,
-        body=_draft_comment_body(draft, nodes_count),
+        body=_draft_comment_body(draft, nodes_count),  # type: ignore[arg-type]  # SDK accepts a plain dict body
     )
     log.info("action_agent.draft_posted", step="comment", issue_key=issue_key)
 
