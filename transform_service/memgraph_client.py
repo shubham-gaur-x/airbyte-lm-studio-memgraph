@@ -229,6 +229,7 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                         a.done = $done,
                         a.priority = $priority,
                         a.is_engineering_task = $is_engineering_task,
+                        a.confidence = $confidence,
                         a.updated_at = $now
 
                     WITH a
@@ -248,6 +249,7 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                     done=action.done,
                     priority=action.priority,
                     is_engineering_task=action.is_engineering_task,
+                    confidence=action.confidence,
                     meeting_id=meeting_id,
                     owner_email=action.owner if "@" in action.owner else None,
                     now=now,
@@ -278,6 +280,35 @@ async def update_action_jira_key(action_id: str, jira_key: str) -> None:
             jira_key=jira_key,
             now=datetime.now(timezone.utc).isoformat(),
         )
+
+
+async def mark_action_needs_review(action_id: str, confidence: float) -> None:
+    """P4: gate a low-confidence ActionItem into review instead of a Jira issue."""
+    driver = get_driver()
+    async with driver.session() as session:
+        await session.run(
+            """
+            MATCH (a:ActionItem {id: $id})
+            SET a.jira_status = 'needs_review', a.review_confidence = $confidence, a.updated_at = $now
+            """,
+            id=action_id, confidence=confidence, now=datetime.now(timezone.utc).isoformat(),
+        )
+
+
+async def get_action_confidence(jira_key: str) -> Optional[float]:
+    """Return the confidence of the ActionItem carrying this jira_key, or None if none.
+
+    Used as the dev-agent's independent, pre-pickup gate (P4) — a low-confidence item is
+    not auto-implemented even if it is labelled for the agent.
+    """
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            "MATCH (a:ActionItem {jira_key: $key}) RETURN a.confidence AS c LIMIT 1",
+            key=jira_key,
+        )
+        rec = await result.single()
+        return float(rec["c"]) if rec and rec["c"] is not None else None
 
 
 async def update_action_jira_status(jira_key: str, status: str) -> bool:

@@ -322,6 +322,7 @@ async def test_triage_reports_sprint_candidates():
 
     with (
         patch.object(orch.jira_client, "list_active_sprint_tickets", AsyncMock(return_value=candidates)) as mock_list,
+        patch.object(orch.memgraph_client, "get_action_confidence", AsyncMock(return_value=None)),
         patch.dict("os.environ", {"JIRA_PROJECT_KEY": "SCRUM"}),
     ):
         result = await orch.triage()
@@ -338,6 +339,7 @@ async def test_triage_empty_when_no_eligible_tickets():
 
     with (
         patch.object(orch.jira_client, "list_active_sprint_tickets", AsyncMock(return_value=[])),
+        patch.object(orch.memgraph_client, "get_action_confidence", AsyncMock(return_value=None)),
         patch.dict("os.environ", {"JIRA_PROJECT_KEY": "SCRUM"}),
     ):
         result = await orch.triage()

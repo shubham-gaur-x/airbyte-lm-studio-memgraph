@@ -110,11 +110,23 @@ async def push_action_items(
             log.warning("jira_pusher.sprint_fetch_failed", error=str(exc))
             sprint_id = None
 
+        threshold = float(os.environ.get("JIRA_CONFIDENCE_THRESHOLD", "0.6"))
+
         for i, action in enumerate(action_items):
             # Must match memgraph_client.upsert_meeting_graph's derivation exactly —
             # that function seeds ActionItem.id from the raw source_id, not the
             # Meeting node's id, or this MATCH silently matches zero nodes.
             action_id = uuid5_id("action", f"{source_id}:{i}:{action.task}")
+
+            # P4: gate low-confidence items into review instead of creating a Jira issue.
+            if action.confidence < threshold:
+                await memgraph_client.mark_action_needs_review(action_id, action.confidence)
+                log.info(
+                    "jira_pusher.needs_review",
+                    task=action.task[:60], confidence=round(action.confidence, 2),
+                )
+                continue
+
             description = (
                 f"From meeting: {meeting.title} ({meeting.date})\n"
                 f"Owner: {action.owner}\n"

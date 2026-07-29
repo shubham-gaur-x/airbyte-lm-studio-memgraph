@@ -39,7 +39,8 @@ You MUST output ONLY valid JSON matching exactly this schema — no markdown, no
       "due": "YYYY-MM-DD or null",
       "done": false,
       "priority": "high|medium|low",
-      "is_engineering_task": true|false
+      "is_engineering_task": true|false,
+      "confidence": 0.0 to 1.0
     }
   ],
   "key_quotes": ["notable quotes, max 3"],

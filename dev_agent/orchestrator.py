@@ -93,13 +93,27 @@ async def find_sprint_candidates() -> list[Dict[str, Any]]:
     There is no Backlog status in the workflow (verified live), so triage is
     sprint-membership based. Only tickets a human has put in the sprint AND
     labelled ``dev-agent`` are eligible — a deliberate guardrail.
+
+    P4: a second, independent confidence gate. If the ticket traces to an extracted
+    ActionItem whose confidence is below DEV_AGENT_CONFIDENCE_THRESHOLD, it is held back
+    from autonomous coding even though it is labelled — we do not rely on the label alone.
+    A ticket with no linked ActionItem (e.g. human-authored) passes this gate.
     """
-    return await jira_client.list_active_sprint_tickets(
+    candidates = await jira_client.list_active_sprint_tickets(
         JIRA_PROJECT_KEY(),
         [DEV_AGENT_TODO_STATUS()],
         DEV_AGENT_REQUIRE_LABELS(),
         DEV_AGENT_SKIP_LABELS(),
     )
+    threshold = float(_env("DEV_AGENT_CONFIDENCE_THRESHOLD", "0.6"))
+    eligible = []
+    for ticket in candidates:
+        conf = await memgraph_client.get_action_confidence(ticket["key"])
+        if conf is not None and conf < threshold:
+            log.info("orchestrator.triage.low_confidence_skip", key=ticket["key"], confidence=round(conf, 2))
+            continue
+        eligible.append(ticket)
+    return eligible
 
 
 async def triage() -> Dict[str, Any]:

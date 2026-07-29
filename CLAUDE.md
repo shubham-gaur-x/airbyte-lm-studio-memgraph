@@ -364,6 +364,8 @@ JIRA_API_TOKEN=
 JIRA_PROJECT_KEY=SCRUM
 JIRA_BOARD_ID=1
 JIRA_ISSUE_TYPE=Task
+JIRA_CONFIDENCE_THRESHOLD=0.6          # P4: ActionItems below this become needs_review, not a ticket
+PERSON_ROSTER_PATH=                    # P3: JSON roster for entity resolution (empty = none)
 
 # Airbyte webhook verification
 AIRBYTE_WEBHOOK_SECRET=
@@ -393,6 +395,7 @@ ANTHROPIC_API_KEY=                     # required only when DEV_AGENT_LLM_BACKEN
 DEV_AGENT_CLAUDE_MODEL=                # optional, DEV_AGENT_LLM_BACKEND=claude: pin the
                                        # Anthropic model for cost control (e.g. claude-haiku-4-5).
                                        # Empty = Claude Code's own default model.
+DEV_AGENT_CONFIDENCE_THRESHOLD=0.6     # P4: skip autonomous pickup of low-confidence ActionItems
 DEV_AGENT_VERIFY_THRESHOLD=0.6         # P8 self-verify: min confidence to count as "addresses ticket"
 DEV_AGENT_VERIFY_TIMEOUT_SECONDS=180   # P8 self-verify: one-shot scoring call timeout
 GITHUB_WEBHOOK_SECRET=                 # P2 /webhook/github HMAC secret (unset = accept, dev only)
