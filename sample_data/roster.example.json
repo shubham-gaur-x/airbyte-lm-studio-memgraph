@@ -1,0 +1,8 @@
+[
+  {
+    "name": "Example Person",
+    "email": "example.person@yourcompany.com",
+    "aliases": ["e.person@yourcompany.com"],
+    "tracked": false
+  }
+]

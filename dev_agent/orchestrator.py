@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from dev_agent import backend, db, git_ops, github_client, claude_runner, self_verify, session_memory
+from dev_agent import backend, db, git_ops, github_client, claude_runner, lifecycle as lc, self_verify, session_memory
 from dev_agent.backend import PreflightError
 from dev_agent.models import ClaudeRunResult
 from transform_service import jira_client, memgraph_client
@@ -128,12 +128,36 @@ async def triage() -> Dict[str, Any]:
 # Implement a single ticket
 # ---------------------------------------------------------------------------
 
+async def _advance_state(key: str, new_state: str) -> None:
+    """Validate and persist a lifecycle transition (B1 — wires dev_agent/lifecycle.py in).
+
+    Reads the current state and checks the edge is legal, per lifecycle.py's own intent
+    ("illegal transitions raise, turning a logic bug into a loud failure instead of silent
+    corruption") — but a sequencing bug here must not crash ticket processing, so we log
+    and still persist rather than raise. `current is None` (a fresh run, or a run that
+    predates state tracking) skips validation and just writes the first state.
+    """
+    run = await db.get_run(key)
+    current = run.state if run else None
+    if current and current != new_state and not lc.can_transition(current, new_state):
+        log.warning(
+            "orchestrator.illegal_state_transition",
+            ticket_key=key, from_state=current, to_state=new_state,
+        )
+    await db.set_state(key, new_state)
+
+
 async def process_ticket(ticket: Dict[str, Any]) -> None:
     key = ticket["key"]
     bound_log = log.bind(ticket_key=key)
     branch_name = f"agent/{key}"
 
     await db.start_run(key, branch_name)
+    # B1: TRIAGED — the run is claimed. The single claude_runner call below covers what
+    # the state table models as separate PLANNED/IMPLEMENTING/DEBUGGING phases (there is
+    # no per-phase Claude Code invocation today), so we pass through them as checkpoints
+    # around it rather than skipping straight to IMPLEMENTING (which the table forbids).
+    await _advance_state(key, lc.TRIAGED)
 
     try:
         ok = await jira_client.transition_issue(key, DEV_AGENT_IN_PROGRESS_STATUS())
@@ -142,6 +166,7 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
         await jira_client.add_comment(key, f"Picked up by dev_agent (backend={DEV_AGENT_LLM_BACKEND()}).")
 
         detail = await jira_client.get_issue_detail(key)
+        await _advance_state(key, lc.PLANNED)
         work_dir = f"{WORK_ROOT()}/{key}"
 
         await git_ops.create_worktree(REPO_DIR(), work_dir, branch_name)
@@ -149,6 +174,7 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
         resume_context = await session_memory.load_resume_context(key)
         prompt = build_prompt(detail, resume_context=resume_context)
 
+        await _advance_state(key, lc.IMPLEMENTING)
         result: ClaudeRunResult = await claude_runner.run_claude_code(
             work_dir,
             prompt,
@@ -156,6 +182,8 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
             max_turns=DEV_AGENT_MAX_TURNS(),
             model=backend.model_for_run(DEV_AGENT_LLM_BACKEND()),
         )
+        # DEBUGGING: the agent's attempt is over; we are now checking the outcome.
+        await _advance_state(key, lc.DEBUGGING)
 
         # Check for a PR *regardless* of the success flag. A run can push a branch and
         # open a PR and then still report failure (e.g. it hits the turn limit on the
@@ -191,9 +219,11 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
                 await memgraph_client.merge_blocker(reason, ticket_key=key)
             except Exception:
                 bound_log.warning("orchestrator.blocker_write_failed", exc_info=True)
+            await _advance_state(key, lc.FAILED)
             await jira_client.transition_issue(key, DEV_AGENT_TODO_STATUS())
             return
 
+        await _advance_state(key, lc.REVIEWING)
         # A PR exists. Self-verify the diff against the ticket intent (P8) — a cheap scoring
         # pass through the SAME backend. It never blocks review: a low score only flags the
         # comment and sets AgentRun.verified=false. Non-fatal.
@@ -244,6 +274,10 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
             bound_log.warning("orchestrator.review_transition_failed", key=key)
 
         await db.finish_run(key, "pr_opened", pr_url=pr["html_url"], pr_number=pr["number"])
+        # SHIPPED: PR opened and Jira moved to review. CLOSED is reserved for an actual
+        # merge (github_webhook's pull_request/merged event) — cross-service (dev_agent's
+        # own DB from transform_service) and left for a follow-up, not this phase.
+        await _advance_state(key, lc.SHIPPED)
         # P7: record the session memory (files changed pulled from the PR diff).
         await session_memory.record(
             detail, outcome="pr_opened", pr=pr,
@@ -259,6 +293,10 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
         bound_log.error("orchestrator.unexpected_error", exc_info=True)
         try:
             await db.finish_run(key, "failed", error=str(exc))
+        except Exception:
+            pass
+        try:
+            await _advance_state(key, lc.FAILED)
         except Exception:
             pass
         try:
@@ -298,6 +336,24 @@ async def poll_and_process() -> None:
         log.error("orchestrator.poll.repo_unavailable", error=str(exc))
         log.info("orchestrator.poll.done", attempted=0, reason="repo_unavailable")
         return
+
+    # B1: resume a crashed run before looking at new candidates. A run whose process died
+    # mid-flight (e.g. the container was killed during claude_runner) leaves its
+    # dev_agent_runs row stuck at status='running' forever — db.should_attempt refuses to
+    # ever retry a 'running' ticket, so without this it silently stalls until a human
+    # notices. get_active_run() finds that stuck non-terminal state; resuming through
+    # process_ticket() re-feeds the P7 resume_context instead of starting cold.
+    active = await db.get_active_run()
+    if active is not None:
+        log.info(
+            "orchestrator.poll.resuming_crashed_run",
+            ticket_key=active.ticket_key, state=active.state,
+        )
+        try:
+            active_detail = await jira_client.get_issue_detail(active.ticket_key)
+            await process_ticket(active_detail)
+        except Exception:
+            log.error("orchestrator.poll.resume_failed", ticket_key=active.ticket_key, exc_info=True)
 
     tickets = await find_sprint_candidates()
 

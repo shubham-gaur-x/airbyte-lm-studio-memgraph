@@ -259,6 +259,27 @@ past bug class, so never derive these ids anywhere else.
   `PersonReview` nodes `(Meeting)-[:NEEDS_REVIEW]->(:PersonReview)` — never silently dropped. `Person.tracked`
   (default false) is the opt-in gate: `get_influential_nodes` only ranks tracked people (governance —
   no per-person leaderboards by default). Roster comes from `PERSON_ROSTER_PATH` (JSON), empty if unset.
+- `GET /dashboard` (D) serves `transform_service/static/dashboard.html` — a self-contained, vanilla-JS
+  read-only page (Timeline / Review Queue / Provenance Lookup / Insights) consuming the endpoints
+  above. No build step, no external hosts (works with no internet, same as the rest of the pipeline).
+  Governance: the Insights tab's per-person view calls `/graph/insights/influential` (already
+  `tracked`-gated server-side) — never construct a raw per-person ranking client-side.
+- `GET /graph/provenance/{meeting_id}` and `/graph/provenance/by-ticket/{ticket_key}` (B4) are the
+  v5 target end-state query made real: one Cypher MATCH per direction returns
+  meeting -> decision -> action item -> ticket -> AgentRun -> PR -> files. Row-grouping into the
+  nested response shape is pure Python (`memgraph_client._group_meeting_provenance` /
+  `_group_ticket_provenance`, unit-tested without a driver) — decisions are collected to one list
+  before the row-multiplying action-item chain so they don't get duplicated per row.
+- `GET /review/actions`, `/review/people`, `/review/blockers` (B3) surface the P4 needs_review
+  ActionItems, P3 PersonReview nodes, and P9 Blocker nodes that were written but never read back
+  anywhere — the read side of each gate now exists, in `memgraph_client.get_actions_needing_review` /
+  `get_person_reviews` / `get_open_blockers`.
+- `Decision.confidence` (B2 — the other P4 "dead field" gap) mirrors `ActionItem.confidence`: written by
+  `upsert_meeting_graph`, defaulted to 1.0, coerced from a plain string via `ExtractedMeeting`'s
+  `_coerce_decisions` validator for backward compatibility. `Fact.confidence` already had real dynamics
+  (`semantic_memory`: seeded at 0.3, +0.1 per repeat mention) so its B2 gate is read-time, not write-time
+  (a Fact has no Jira-ticket-style side effect to block): `memory_retrieval.person_memory_profile` floors
+  Facts at `FACT_MIN_CONFIDENCE` (default 0.5).
 - `transform_service/dedup.py` (P5) owns the pure dedup *decision* (embedding cosine, text-ratio
   fallback) — no I/O. `vector_memory` now also embeds `ActionItem` nodes
   (`embed_action_items_for_meeting`). `jira_pusher._find_duplicate` uses
@@ -277,6 +298,10 @@ past bug class, so never derive these ids anywhere else.
   producer (Google Meet REST fetch + Cloud Pub/Sub PULL — no inbound tunnel; needs GCP creds,
   disabled no-op without them). Transcript rows are staged via `db.insert_meet_transcript` (SQL only
   in db.py); a different capture source (notetaker) implements the same seam without touching downstream.
+- `process_new_transcripts` and `meet_ingest.pull_and_stage` (via `main._poll_meet_transcripts`, B5) now
+  run on the same 5-minute scheduler interval as the other polls — previously only fired from
+  `/webhook/airbyte`'s background_tasks, so a transcript staged directly by the Pub/Sub-pull consumer
+  had nothing draining it until an unrelated Airbyte sync happened to run.
 
 ---
 
@@ -383,6 +408,7 @@ JIRA_PROJECT_KEY=SCRUM
 JIRA_BOARD_ID=1
 JIRA_ISSUE_TYPE=Task
 JIRA_CONFIDENCE_THRESHOLD=0.6          # P4: ActionItems below this become needs_review, not a ticket
+FACT_MIN_CONFIDENCE=0.5                # B2 (P4 extension): read-time floor in person_memory_profile
 PERSON_ROSTER_PATH=                    # P3: JSON roster for entity resolution (empty = none)
 
 # Airbyte webhook verification

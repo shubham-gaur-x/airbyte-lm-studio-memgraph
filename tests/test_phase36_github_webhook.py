@@ -94,3 +94,28 @@ async def test_push_to_non_agent_branch_ignored():
 async def test_unknown_event_ignored():
     out = await gw.handle_event("check_suite", {})
     assert out["status"] == "ignored"
+
+
+# --- the actual /webhook/github route, not just handle_event ---------------
+# Regression: a live v5.1 Phase E run hit `log.info("...", event=event)` in the real
+# route — `event` collides with structlog's own reserved kwarg (the log message text)
+# and raises TypeError at call time. Every prior test called handle_event() directly and
+# never exercised this route function's own logging, so nothing caught it. Drive the real
+# ASGI app end-to-end (not the Python function directly) so a real structlog call fires,
+# same as production traffic.
+@pytest.mark.anyio
+async def test_webhook_github_route_accepts_real_request_without_logging_error():
+    import httpx
+
+    from transform_service import main
+
+    with patch.object(main.github_webhook, "handle_event", AsyncMock()):
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/webhook/github",
+                json={"ref": "refs/heads/agent/SCRUM-1", "commits": []},
+                headers={"X-GitHub-Event": "push"},
+            )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "queued", "event": "push"}

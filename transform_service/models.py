@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, time
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class Attendee(BaseModel):
@@ -29,6 +29,15 @@ class ActionItem(BaseModel):
     confidence: float = 1.0
 
 
+class Decision(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    text: str
+    # P4 (B2): per-item extraction confidence, same pattern as ActionItem.confidence.
+    # Defaults to 1.0 so decisions the model does not score are not gated.
+    confidence: float = 1.0
+
+
 class ExtractedMeeting(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -43,13 +52,23 @@ class ExtractedMeeting(BaseModel):
     attendees: List[Attendee] = []
     summary: str
     topics: List[str] = []
-    decisions: List[str] = []
+    decisions: List[Decision] = []
     action_items: List[ActionItem] = []
     key_quotes: List[str] = []
     links: List[str] = []
     sentiment: Literal["positive", "neutral", "negative", "mixed"] = "neutral"
     follow_up_needed: bool = False
     confidence: float = 0.0
+
+    @field_validator("decisions", mode="before")
+    @classmethod
+    def _coerce_decisions(cls, v: Any) -> Any:
+        """Backward-compat: decisions used to be List[str] (still is, sometimes, in
+        pre-B2 callers and LLM output that omits confidence). Coerce a plain string
+        entry to {"text": ..., "confidence": 1.0} so both shapes validate."""
+        if not isinstance(v, list):
+            return v
+        return [{"text": item, "confidence": 1.0} if isinstance(item, str) else item for item in v]
 
 
 class RawEmail(BaseModel):

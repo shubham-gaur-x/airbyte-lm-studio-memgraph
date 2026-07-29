@@ -238,16 +238,24 @@ async def person_memory_profile(email: str) -> dict:
             return {}
         profile = records[0]
 
-        # Semantic: facts
+        # Semantic: facts. B2 (P4 extension): floor out low-confidence, single-mention
+        # facts by default — semantic_memory seeds a new Fact at 0.3 and only raises it
+        # +0.1 per repeat mention, so an unfiltered read surfaces a lot of one-off noise
+        # at the same weight as a fact repeated across many meetings. Read-time (not
+        # write-time, unlike ActionItem/Decision) since a Fact has no Jira-ticket-style
+        # side effect to gate — nothing to block, just a retrieval-quality floor.
+        min_confidence = float(os.environ.get("FACT_MIN_CONFIDENCE", "0.5"))
         result = await session.run(
             """
             MATCH (p:Person {email: $email})-[:ATTENDED]->(m:Meeting)-[:HAS_FACT]->(f:Fact)
+            WHERE f.confidence >= $min_confidence
             RETURN DISTINCT f.id AS id, f.text AS text,
                             f.confidence AS confidence, f.source_count AS source_count
             ORDER BY f.confidence DESC
             LIMIT 10
             """,
             email=email,
+            min_confidence=min_confidence,
         )
         profile["facts"] = [dict(r) async for r in result]
 

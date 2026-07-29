@@ -3,16 +3,19 @@ from __future__ import annotations
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from transform_service import action_agent, db, episodic_memory, graph_algorithms, meeting_quality, memgraph_client, procedural_memory, semantic_memory, vector_memory
 from transform_service.memory_retrieval import full_memory_query, person_memory_profile
 from transform_service.digest import weekly_digest
+from transform_service import meet_ingest
 from transform_service.graph_builder import process_new_emails, process_new_events, process_new_transcripts
 from transform_service import github_webhook
 from transform_service.jira_agent import process_jira_issues
@@ -55,6 +58,14 @@ async def _ping_postgres() -> bool:
         return False
 
 
+async def _poll_meet_transcripts() -> None:
+    """B5: pull any pending Google Meet transcripts (P1's Pub/Sub-pull consumer) and drain
+    them immediately. A no-op when GOOGLE_ACCESS_TOKEN / MEET_PUBSUB_SUBSCRIPTION are unset
+    (meet_ingest.pull_and_stage's own disabled-safe-default), so scheduling this
+    unconditionally is harmless without live GCP creds."""
+    await meet_ingest.pull_and_stage(process=process_new_transcripts)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info(
@@ -72,6 +83,11 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(process_new_emails, "interval", minutes=5, id="poll_emails")
     scheduler.add_job(process_new_events, "interval", minutes=5, id="poll_events")
     scheduler.add_job(process_jira_issues, "interval", minutes=5, id="poll_jira")
+    # B5: drain P1 transcripts on an interval, not only from /webhook/airbyte's
+    # background_tasks — a transcript staged directly by meet_ingest otherwise had
+    # nothing processing it until the next unrelated Airbyte sync.
+    scheduler.add_job(process_new_transcripts, "interval", minutes=5, id="poll_transcripts")
+    scheduler.add_job(_poll_meet_transcripts, "interval", minutes=5, id="poll_meet_pull")
     scheduler.add_job(
         graph_algorithms.run_full_algorithms,
         "cron", hour=2, minute=0,
@@ -176,8 +192,22 @@ async def webhook_github(request: Request, background_tasks: BackgroundTasks) ->
         raise HTTPException(status_code=400, detail="bad json")
 
     background_tasks.add_task(github_webhook.handle_event, event, payload)
-    log.info("webhook.github.queued", event=event)
+    # NOTE: `event=` collides with structlog's own reserved `event` kwarg (the log
+    # message text) and raises TypeError at call time — caught live (v5.1 Phase E) because
+    # every existing test called github_webhook.handle_event directly, never this route
+    # function itself, so a real structlog call was never exercised. Use github_event=.
+    log.info("webhook.github.queued", github_event=event)
     return {"status": "queued", "event": event}
+
+
+_DASHBOARD_PATH = Path(__file__).parent / "static" / "dashboard.html"
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard() -> HTMLResponse:
+    """D: read-only provenance dashboard — timeline, review queues (B3), and the
+    meeting<->ticket provenance traversal (B4) in one self-contained static page."""
+    return HTMLResponse(content=_DASHBOARD_PATH.read_text(encoding="utf-8"))
 
 
 @app.get("/health")
@@ -218,6 +248,43 @@ async def topic(name: str) -> Dict[str, Any]:
 async def actions_open() -> Dict[str, Any]:
     actions = await memgraph_client.get_open_actions()
     return {"actions": actions, "count": len(actions)}
+
+
+@app.get("/review/actions")
+async def review_actions() -> Dict[str, Any]:
+    """B3: ActionItems P4 gated below JIRA_CONFIDENCE_THRESHOLD (needs_review, no ticket)."""
+    actions = await memgraph_client.get_actions_needing_review()
+    return {"actions": actions, "count": len(actions)}
+
+
+@app.get("/review/people")
+async def review_people() -> Dict[str, Any]:
+    """B3: unresolved attendees P3 held for review instead of silently dropping."""
+    people = await memgraph_client.get_person_reviews()
+    return {"people": people, "count": len(people)}
+
+
+@app.get("/review/blockers")
+async def review_blockers() -> Dict[str, Any]:
+    """B3: open Blocker nodes P9 wrote on dev-agent run failures."""
+    blockers = await memgraph_client.get_open_blockers()
+    return {"blockers": blockers, "count": len(blockers)}
+
+
+@app.get("/graph/provenance/{meeting_id}")
+async def graph_provenance(meeting_id: str) -> Dict[str, Any]:
+    """B4: one traversal — meeting -> decision -> action item -> ticket -> agent run ->
+    PR -> files. The dashboard's data layer (v5 target end-state query)."""
+    return await memgraph_client.get_meeting_provenance(meeting_id)
+
+
+@app.get("/graph/provenance/by-ticket/{ticket_key}")
+async def graph_provenance_by_ticket(ticket_key: str) -> Dict[str, Any]:
+    """B4: the reverse traversal, entering from a Jira key instead of a meeting id."""
+    out = await memgraph_client.get_ticket_provenance(ticket_key)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"No ticket found for key {ticket_key!r}")
+    return out
 
 
 @app.get("/meetings/quality")
