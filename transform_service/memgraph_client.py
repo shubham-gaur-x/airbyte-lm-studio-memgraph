@@ -1009,7 +1009,8 @@ async def get_ticket_provenance(ticket_key: str) -> Optional[Dict[str, Any]]:
                    run.id AS run_id, run.attempt AS run_attempt, run.status AS run_status,
                    run.verified AS run_verified,
                    pr.url AS pr_url, pr.number AS pr_number,
-                   c.sha AS commit_sha, fc.path AS file_path, fc.change_type AS file_change_type
+                   c.sha AS commit_sha, c.message AS commit_message,
+                   fc.path AS file_path, fc.change_type AS file_change_type
             """,
             ticket_key=ticket_key,
         )

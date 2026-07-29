@@ -109,6 +109,23 @@ def test_group_ticket_provenance_not_found():
     assert mc._group_ticket_provenance([]) is None
 
 
+def test_group_ticket_provenance_carries_commit_message():
+    """Regression (v5.1 Phase E live run): get_ticket_provenance's Cypher originally
+    selected c.sha but not c.message, so the reverse traversal always showed
+    commit.message=null even though get_meeting_provenance (forward direction) carried it
+    correctly — an inconsistency between the two directions, not a fundamental gap."""
+    rows = [dict(
+        ticket_key="SCRUM-1", ticket_summary="Fix bug", meeting_id="m1", meeting_title="Sync",
+        action_id="a1", action_task="fix bug",
+        run_id="r1", run_attempt=1, run_status="pr_opened", run_verified=True,
+        pr_url="https://x/pull/1", pr_number=1,
+        commit_sha="abc", commit_message="fix the bug", file_path="a.py", file_change_type="modified",
+    )]
+    out = mc._group_ticket_provenance(rows)
+    commit = out["agent_runs"][0]["pull_request"]["commits"][0]
+    assert commit["message"] == "fix the bug"
+
+
 # --- async readers issue the right Cypher ------------------------------------
 def _driver_with_rows(rows):
     result = AsyncMock()
@@ -145,6 +162,7 @@ async def test_get_ticket_provenance_issues_expected_traversal():
     cypher = session.run.call_args.args[0]
     for clause in ("TICKETED_AS", "FOLLOWS_UP", "IMPLEMENTS", "CONTAINS", "MODIFIES"):
         assert clause in cypher
+    assert "c.message" in cypher  # parity with get_meeting_provenance — see regression above
     assert out["ticket"]["key"] == "SCRUM-1"
 
 
