@@ -259,6 +259,12 @@ past bug class, so never derive these ids anywhere else.
   `PersonReview` nodes `(Meeting)-[:NEEDS_REVIEW]->(:PersonReview)` — never silently dropped. `Person.tracked`
   (default false) is the opt-in gate: `get_influential_nodes` only ranks tracked people (governance —
   no per-person leaderboards by default). Roster comes from `PERSON_ROSTER_PATH` (JSON), empty if unset.
+- `transform_service/dedup.py` (P5) owns the pure dedup *decision* (embedding cosine, text-ratio
+  fallback) — no I/O. `vector_memory` now also embeds `ActionItem` nodes
+  (`embed_action_items_for_meeting`). `jira_pusher._find_duplicate` uses
+  `memgraph_client.get_open_actions_for_owner` + `dedup.best_match`; on a match above
+  `JIRA_DEDUP_THRESHOLD` it links `(existing ActionItem)-[:MENTIONED_IN]->(new Meeting)` and comments
+  on the existing ticket instead of opening a duplicate (gated by `JIRA_DEDUP_ENABLED`, default true).
 
 ---
 

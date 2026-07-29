@@ -64,6 +64,41 @@ async def embed_meeting(meeting_id: str, summary: str) -> bool:
     return True
 
 
+async def embed_action_items_for_meeting(meeting_id: str) -> int:
+    """P5: embed this meeting's ActionItems that lack an embedding, for dedup similarity.
+    Idempotent; returns the count embedded."""
+    driver = memgraph_client.get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (m:Meeting {id: $meeting_id})-[:FOLLOWS_UP]->(a:ActionItem)
+            WHERE a.embedding IS NULL AND a.task IS NOT NULL
+            RETURN a.id AS id, a.task AS task
+            """,
+            meeting_id=meeting_id,
+        )
+        rows = [dict(r) async for r in result]
+
+    count = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for row in rows:
+        vector = await embed_text(row["task"])
+        if vector is None:
+            continue
+        async with driver.session() as session:
+            await session.run(
+                """
+                MATCH (a:ActionItem {id: $id})
+                SET a.embedding = $embedding, a.embedding_updated_at = $now
+                """,
+                id=row["id"], embedding=vector, now=now,
+            )
+        count += 1
+    if count:
+        log.info("vector_memory.actions_embedded", meeting_id=meeting_id, count=count)
+    return count
+
+
 async def embed_facts_for_meeting(meeting_id: str) -> int:
     """Embed any Facts attached to this meeting that don't have an embedding yet.
     Idempotent and safe to call on every ingestion — MERGE-matched existing Facts

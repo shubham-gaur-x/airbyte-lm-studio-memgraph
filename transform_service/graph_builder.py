@@ -55,6 +55,7 @@ async def process_email(email: RawEmail) -> bool:
                 log.info("graph_builder.procedures_matched", procedures=matched, meeting_id=node_id)
             await vector_memory.embed_meeting(node_id, meeting.summary)
             await vector_memory.embed_facts_for_meeting(node_id)
+            await vector_memory.embed_action_items_for_meeting(node_id)
         except Exception as exc:
             log.warning("graph_builder.memory_skipped", error=str(exc))
 
@@ -132,6 +133,7 @@ async def process_calendar_event(event: RawCalendarEvent) -> bool:
                 log.info("graph_builder.procedures_matched", procedures=matched, meeting_id=node_id)
             await vector_memory.embed_meeting(node_id, meeting.summary)
             await vector_memory.embed_facts_for_meeting(node_id)
+            await vector_memory.embed_action_items_for_meeting(node_id)
         except Exception as exc:
             log.warning("graph_builder.memory_skipped", error=str(exc))
 

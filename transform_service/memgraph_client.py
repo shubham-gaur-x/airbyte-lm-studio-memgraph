@@ -282,6 +282,39 @@ async def update_action_jira_key(action_id: str, jira_key: str) -> None:
         )
 
 
+async def get_open_actions_for_owner(owner: str, exclude_id: str) -> List[Dict[str, Any]]:
+    """P5: open (not done) ActionItems for an owner — dedup candidates for a new item."""
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (m:Meeting)-[:FOLLOWS_UP]->(a:ActionItem)
+            WHERE a.owner = $owner AND a.id <> $exclude_id
+              AND coalesce(a.done, false) = false
+            RETURN a.id AS id, a.jira_key AS jira_key, a.task AS task,
+                   a.embedding AS embedding, m.title AS meeting_title
+            """,
+            owner=owner, exclude_id=exclude_id,
+        )
+        return [dict(r) async for r in result]
+
+
+async def link_action_mentioned_in(action_id: str, meeting_id: str) -> None:
+    """P5: record that an existing ActionItem was raised again in a later Meeting."""
+    driver = get_driver()
+    async with driver.session() as session:
+        await session.run(
+            """
+            MATCH (a:ActionItem {id: $action_id})
+            MATCH (m:Meeting {id: $meeting_id})
+            MERGE (a)-[r:MENTIONED_IN]->(m)
+            ON CREATE SET r.created_at = $now
+            """,
+            action_id=action_id, meeting_id=meeting_id,
+            now=datetime.now(timezone.utc).isoformat(),
+        )
+
+
 async def mark_action_needs_review(action_id: str, confidence: float) -> None:
     """P4: gate a low-confidence ActionItem into review instead of a Jira issue."""
     driver = get_driver()
