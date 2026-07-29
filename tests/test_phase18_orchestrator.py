@@ -86,6 +86,7 @@ async def test_process_ticket_success():
 
     with (
         patch.object(orch.db, "start_run", AsyncMock()),
+        patch.object(orch.db, "set_state", AsyncMock()),
         patch.object(orch.session_memory, "load_resume_context", AsyncMock(return_value=None)),
         patch.object(orch.session_memory, "record", AsyncMock()),
         patch.object(orch.memgraph_client, "merge_blocker", AsyncMock()),
@@ -139,6 +140,7 @@ async def test_process_ticket_claude_failure():
 
     with (
         patch.object(orch.db, "start_run", AsyncMock()),
+        patch.object(orch.db, "set_state", AsyncMock()),
         patch.object(orch.session_memory, "load_resume_context", AsyncMock(return_value=None)),
         patch.object(orch.session_memory, "record", AsyncMock()),
         patch.object(orch.memgraph_client, "merge_blocker", AsyncMock()),
@@ -185,6 +187,7 @@ async def test_process_ticket_no_pr_after_success():
 
     with (
         patch.object(orch.db, "start_run", AsyncMock()),
+        patch.object(orch.db, "set_state", AsyncMock()),
         patch.object(orch.session_memory, "load_resume_context", AsyncMock(return_value=None)),
         patch.object(orch.session_memory, "record", AsyncMock()),
         patch.object(orch.memgraph_client, "merge_blocker", AsyncMock()),
@@ -237,6 +240,7 @@ async def test_process_ticket_pr_exists_despite_run_failure():
 
     with (
         patch.object(orch.db, "start_run", AsyncMock()),
+        patch.object(orch.db, "set_state", AsyncMock()),
         patch.object(orch.session_memory, "load_resume_context", AsyncMock(return_value=None)),
         patch.object(orch.session_memory, "record", AsyncMock()),
         patch.object(orch.memgraph_client, "merge_blocker", AsyncMock()),
@@ -288,6 +292,8 @@ async def test_process_ticket_exception_during_execution():
 
     with (
         patch.object(orch.db, "start_run", AsyncMock()),
+        patch.object(orch.db, "set_state", AsyncMock()),
+        patch.object(orch.db, "get_run", AsyncMock(return_value=_SAMPLE_RUN)),
         patch.object(orch.session_memory, "load_resume_context", AsyncMock(return_value=None)),
         patch.object(orch.session_memory, "record", AsyncMock()),
         patch.object(orch.memgraph_client, "merge_blocker", AsyncMock()),
