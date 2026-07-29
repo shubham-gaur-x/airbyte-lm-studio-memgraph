@@ -10,10 +10,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from dev_agent import backend, db, git_ops, github_client, claude_runner
+from dev_agent import backend, db, git_ops, github_client, claude_runner, self_verify
 from dev_agent.backend import PreflightError
 from dev_agent.models import ClaudeRunResult
-from transform_service import jira_client
+from transform_service import jira_client, memgraph_client
 
 log = structlog.get_logger()
 
@@ -137,33 +137,86 @@ async def process_ticket(ticket: Dict[str, Any]) -> None:
             model=backend.model_for_run(DEV_AGENT_LLM_BACKEND()),
         )
 
-        if not result.success:
-            bound_log.error("orchestrator.claude_failed", error=result.result_text[:200])
-            await db.finish_run(key, "failed", error=result.result_text[:2000])
-            reason = result.result_text.strip()[:500] or "no error detail captured"
-            await jira_client.add_comment(
-                key,
-                f"Dev agent could not complete this ticket automatically. Needs human follow-up.\n\nError: {reason}",
-            )
-            await jira_client.transition_issue(key, DEV_AGENT_TODO_STATUS())
-            return
-
+        # Check for a PR *regardless* of the success flag. A run can push a branch and
+        # open a PR and then still report failure (e.g. it hits the turn limit on the
+        # verification step afterwards — the live SCRUM-50 failure mode). Dropping that
+        # PR and reverting the ticket to TO DO loses good work, so the PR check gates the
+        # outcome, not `result.success`.
         pr = await github_client.find_open_pr(GITHUB_OWNER(), GITHUB_REPO(), branch_name)
+
         if pr is None:
-            error_msg = "claude_code reported success but no PR was found for this branch"
-            bound_log.error("orchestrator.pr_not_found")
-            await db.finish_run(key, "failed", error=error_msg)
-            await jira_client.add_comment(key, "Dev agent reported success but no PR was found. Needs human follow-up.")
+            # No PR produced — a genuine failure whichever way the run reported.
+            reason = (result.result_text or "").strip()[:500] or "no error detail captured"
+            if result.success:
+                bound_log.error("orchestrator.pr_not_found")
+                await db.finish_run(key, "failed", error="reported success but no PR was found")
+                await jira_client.add_comment(
+                    key, "Dev agent reported success but no PR was found. Needs human follow-up."
+                )
+            else:
+                bound_log.error("orchestrator.claude_failed", error=result.result_text[:200])
+                await db.finish_run(key, "failed", error=result.result_text[:2000])
+                await jira_client.add_comment(
+                    key,
+                    "Dev agent could not complete this ticket automatically. Needs human "
+                    f"follow-up.\n\nError: {reason}",
+                )
             await jira_client.transition_issue(key, DEV_AGENT_TODO_STATUS())
             return
 
-        await jira_client.add_comment(key, f"Implemented automatically. PR: {pr['html_url']}")
+        # A PR exists. Self-verify the diff against the ticket intent (P8) — a cheap scoring
+        # pass through the SAME backend. It never blocks review: a low score only flags the
+        # comment and sets AgentRun.verified=false. Non-fatal.
+        verdict = None
+        try:
+            diff = await github_client.get_pr_diff(GITHUB_OWNER(), GITHUB_REPO(), pr["number"])
+            verdict = await self_verify.verify_pr(
+                ticket, diff, model=backend.model_for_run(DEV_AGENT_LLM_BACKEND())
+            )
+        except Exception:
+            bound_log.warning("orchestrator.self_verify_failed", exc_info=True)
+        verified = verdict.passed if (verdict and verdict.checked) else None
+
+        # Record provenance at the same point we record the dev_agent_runs row, so the run
+        # is reachable in one traversal (P2). Non-fatal: a graph hiccup must not lose the
+        # PR link or block the Jira transition.
+        run = await db.get_run(key)
+        attempt = run.attempt_count if run and run.attempt_count else 1
+        try:
+            await memgraph_client.write_run_provenance(
+                ticket_key=key, attempt=attempt, pr_url=pr["html_url"],
+                pr_number=pr.get("number"), branch=branch_name,
+                ticket_summary=ticket.get("summary", ""), status="pr_opened",
+                verified=verified,
+            )
+        except Exception:
+            bound_log.warning("orchestrator.provenance_write_failed", exc_info=True)
+
+        # Compose the Jira comment: did the run finish + did the automated check confirm it.
+        base = (
+            "Implemented automatically." if result.success
+            else "PR opened, but the agent's run ended early (e.g. turn limit) before finishing."
+        )
+        if verdict and verdict.checked and not verdict.passed:
+            flag = (
+                " Automated check could NOT confirm the diff addresses the ticket "
+                f"(confidence {verdict.confidence:.2f}: {verdict.reason}) — review carefully."
+            )
+        elif verdict and verdict.passed:
+            flag = " Automated check: the diff appears to address the ticket."
+        else:
+            flag = ""
+        await jira_client.add_comment(key, f"{base}{flag} PR: {pr['html_url']}")
+
         ok = await jira_client.transition_issue(key, DEV_AGENT_REVIEW_STATUS())
         if not ok:
             bound_log.warning("orchestrator.review_transition_failed", key=key)
 
         await db.finish_run(key, "pr_opened", pr_url=pr["html_url"], pr_number=pr["number"])
-        bound_log.info("orchestrator.ticket_done", pr_url=pr["html_url"])
+        bound_log.info(
+            "orchestrator.ticket_done", pr_url=pr["html_url"],
+            run_success=result.success, verified=verified,
+        )
 
     except Exception as exc:
         bound_log.error("orchestrator.unexpected_error", exc_info=True)

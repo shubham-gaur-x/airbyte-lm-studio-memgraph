@@ -51,6 +51,10 @@ if "fastapi" not in sys.modules:
     sys.modules["fastapi.middleware.cors"] = sub.cors
 
 from dev_agent.models import ClaudeRunResult, DevAgentRun
+from dev_agent.self_verify import VerifyVerdict
+
+_PASS_VERDICT = VerifyVerdict(checked=True, addresses=True, confidence=0.9, reason="ok")
+_UNCHECKED_VERDICT = VerifyVerdict(checked=False, reason="scorer unavailable")
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +72,8 @@ SAMPLE_TICKET = {
 
 SAMPLE_PR = {"number": 7, "html_url": "https://github.com/owner/repo/pull/7"}
 
+_SAMPLE_RUN = DevAgentRun(ticket_key="SCRUM-42", status="running", attempt_count=1)
+
 
 # ---------------------------------------------------------------------------
 # process_ticket — success path
@@ -80,7 +86,9 @@ async def test_process_ticket_success():
 
     with (
         patch.object(orch.db, "start_run", AsyncMock()),
+        patch.object(orch.db, "get_run", AsyncMock(return_value=_SAMPLE_RUN)),
         patch.object(orch.db, "finish_run", AsyncMock()) as mock_finish,
+        patch.object(orch.memgraph_client, "write_run_provenance", AsyncMock()) as mock_prov,
         patch.object(orch.jira_client, "transition_issue", AsyncMock(return_value=True)),
         patch.object(orch.jira_client, "get_issue_detail", AsyncMock(return_value=SAMPLE_TICKET)),
         patch.object(orch.jira_client, "add_comment", AsyncMock()),
@@ -90,6 +98,8 @@ async def test_process_ticket_success():
             return_value=ClaudeRunResult(success=True, returncode=0, result_text="done", num_turns=5)
         )),
         patch.object(orch.github_client, "find_open_pr", AsyncMock(return_value=SAMPLE_PR)),
+        patch.object(orch.github_client, "get_pr_diff", AsyncMock(return_value="diff --git a/x b/x")),
+        patch.object(orch.self_verify, "verify_pr", AsyncMock(return_value=_PASS_VERDICT)) as mock_verify,
         patch.dict("os.environ", {
             "GITHUB_OWNER": "owner", "GITHUB_REPO": "repo",
             "JIRA_PROJECT_KEY": "SCRUM",
@@ -102,6 +112,11 @@ async def test_process_ticket_success():
         pr_url=SAMPLE_PR["html_url"],
         pr_number=SAMPLE_PR["number"],
     )
+    # Provenance recorded at the same point as the run row (P2), with the verify verdict (P8).
+    mock_prov.assert_awaited_once()
+    assert mock_prov.await_args.kwargs["pr_url"] == SAMPLE_PR["html_url"]
+    assert mock_prov.await_args.kwargs["verified"] is True
+    mock_verify.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +136,9 @@ async def test_process_ticket_claude_failure():
 
     with (
         patch.object(orch.db, "start_run", AsyncMock()),
+        patch.object(orch.db, "get_run", AsyncMock(return_value=_SAMPLE_RUN)),
         patch.object(orch.db, "finish_run", AsyncMock()) as mock_finish,
+        patch.object(orch.memgraph_client, "write_run_provenance", AsyncMock()) as mock_prov,
         patch.object(orch.jira_client, "transition_issue", side_effect=_transition),
         patch.object(orch.jira_client, "get_issue_detail", AsyncMock(return_value=SAMPLE_TICKET)),
         patch.object(orch.jira_client, "add_comment", AsyncMock()),
@@ -130,7 +147,8 @@ async def test_process_ticket_claude_failure():
         patch.object(orch.claude_runner, "run_claude_code", AsyncMock(
             return_value=ClaudeRunResult(success=False, returncode=1, result_text="error output")
         )),
-        patch.object(orch.github_client, "find_open_pr", AsyncMock()),
+        # Genuine failure: the run produced no PR.
+        patch.object(orch.github_client, "find_open_pr", AsyncMock(return_value=None)),
         patch.dict("os.environ", {"GITHUB_OWNER": "owner", "GITHUB_REPO": "repo", "JIRA_PROJECT_KEY": "SCRUM"}),
     ):
         await orch.process_ticket(SAMPLE_TICKET)
@@ -140,6 +158,8 @@ async def test_process_ticket_claude_failure():
     assert call_kwargs[0][1] == "failed"  # status
     # Ticket must have been transitioned back toward TO DO
     assert any("To Do" in s for s in transition_calls)
+    # No PR → no provenance written.
+    mock_prov.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +179,9 @@ async def test_process_ticket_no_pr_after_success():
 
     with (
         patch.object(orch.db, "start_run", AsyncMock()),
+        patch.object(orch.db, "get_run", AsyncMock(return_value=_SAMPLE_RUN)),
         patch.object(orch.db, "finish_run", AsyncMock()) as mock_finish,
+        patch.object(orch.memgraph_client, "write_run_provenance", AsyncMock()) as mock_prov,
         patch.object(orch.jira_client, "transition_issue", side_effect=_transition),
         patch.object(orch.jira_client, "get_issue_detail", AsyncMock(return_value=SAMPLE_TICKET)),
         patch.object(orch.jira_client, "add_comment", AsyncMock()),
@@ -176,6 +198,65 @@ async def test_process_ticket_no_pr_after_success():
     call_kwargs = mock_finish.call_args
     assert call_kwargs[0][1] == "failed"
     assert any("To Do" in s for s in transition_calls)
+    mock_prov.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# process_ticket — PR opened but run ended early (the live SCRUM-50 failure mode)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_process_ticket_pr_exists_despite_run_failure():
+    """success=False but a PR was pushed before the turn limit → In Review, not TO DO.
+
+    Regression for the live SCRUM-50 run: Claude opened a PR and *then* hit max_turns on
+    the verify step. The old code saw success=False, never checked for the PR, and reverted
+    the ticket to TO DO with a 'needs human' comment. The PR must now be honoured.
+    """
+    import dev_agent.orchestrator as orch
+
+    transitions: list = []
+
+    async def _transition(key, status):
+        transitions.append(status)
+        return True
+
+    comments: list = []
+
+    async def _comment(key, body):
+        comments.append(body)
+
+    with (
+        patch.object(orch.db, "start_run", AsyncMock()),
+        patch.object(orch.db, "get_run", AsyncMock(return_value=_SAMPLE_RUN)),
+        patch.object(orch.db, "finish_run", AsyncMock()) as mock_finish,
+        patch.object(orch.memgraph_client, "write_run_provenance", AsyncMock()) as mock_prov,
+        patch.object(orch.jira_client, "transition_issue", side_effect=_transition),
+        patch.object(orch.jira_client, "get_issue_detail", AsyncMock(return_value=SAMPLE_TICKET)),
+        patch.object(orch.jira_client, "add_comment", side_effect=_comment),
+        patch.object(orch.git_ops, "create_worktree", AsyncMock()),
+        patch.object(orch.git_ops, "remove_worktree", AsyncMock()),
+        patch.object(orch.claude_runner, "run_claude_code", AsyncMock(
+            return_value=ClaudeRunResult(success=False, returncode=1, result_text="error_max_turns")
+        )),
+        patch.object(orch.github_client, "find_open_pr", AsyncMock(return_value=SAMPLE_PR)),
+        patch.object(orch.github_client, "get_pr_diff", AsyncMock(return_value="diff")),
+        patch.object(orch.self_verify, "verify_pr", AsyncMock(return_value=_UNCHECKED_VERDICT)),
+        patch.dict("os.environ", {"GITHUB_OWNER": "owner", "GITHUB_REPO": "repo", "JIRA_PROJECT_KEY": "SCRUM"}),
+    ):
+        await orch.process_ticket(SAMPLE_TICKET)
+
+    # Outcome is pr_opened, NOT failed — the PR is not dropped.
+    mock_finish.assert_called_once_with(
+        "SCRUM-42", "pr_opened", pr_url=SAMPLE_PR["html_url"], pr_number=SAMPLE_PR["number"],
+    )
+    # Moves to In Review, never back to To Do.
+    assert any("In Review" in s for s in transitions)
+    assert not any("To Do" in s for s in transitions)
+    # Provenance still recorded.
+    mock_prov.assert_awaited_once()
+    # The comment is flagged distinctly (not the plain "Implemented automatically").
+    assert any("ended early" in c and SAMPLE_PR["html_url"] in c for c in comments)
 
 
 # ---------------------------------------------------------------------------
