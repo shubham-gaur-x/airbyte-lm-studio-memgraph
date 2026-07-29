@@ -167,7 +167,10 @@ async def test_env_anthropic_api_key_cleared():
         proc = _make_proc(0, _json_stdout(), b"")
         return proc
 
-    with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-real-key"}):
+    # Force the local backend explicitly — this test asserts the local-backend guarantee
+    # and must not depend on ambient DEV_AGENT_LLM_BACKEND (a real .env may legitimately
+    # set it to a hosted backend for other work, as ours does).
+    with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-real-key", "DEV_AGENT_LLM_BACKEND": "local"}):
         with patch("asyncio.create_subprocess_exec", side_effect=_fake_exec):
             await run_claude_code("/work/SCRUM-6", "test", 600, 40)
 

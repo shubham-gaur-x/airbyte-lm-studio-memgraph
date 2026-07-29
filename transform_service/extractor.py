@@ -55,6 +55,18 @@ is_engineering_task is true only if completing this requires writing or changing
 If information is not present, use null or empty arrays. Never invent information not in the source text."""
 
 
+def _is_null_like(value: Any) -> bool:
+    """True for None/empty AND for a model that emits the literal string "null"
+    instead of a JSON null (observed live: gemma3-12b sometimes does this for
+    optional fields). A plain ``if not data.get(...)`` misses that case since a
+    non-empty string is truthy, so every fallback below routes through this."""
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip().lower() in ("", "null", "none", "n/a"):
+        return True
+    return False
+
+
 def _loads_lenient(text: str) -> Optional[Dict[str, Any]]:
     """Parse JSON, tolerating a model that wraps the object in stray prose.
 
@@ -142,22 +154,24 @@ async def extract_meeting(
 
     try:
         ctx = context or {}
-        # Fill required fields when LLM returns null
-        if not data.get("platform"):
+        # Fill required fields when LLM returns null (including the literal string "null")
+        if _is_null_like(data.get("platform")):
             data["platform"] = ctx.get("platform", "unknown")
-        if not data.get("date"):
+        if _is_null_like(data.get("date")):
             fallback_date = ctx.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
             data["date"] = fallback_date
-        if not data.get("summary"):
-            data["summary"] = data.get("title", "No summary available")
-        # Sanitize action_items — owner and task must be strings
+        if _is_null_like(data.get("summary")):
+            data["summary"] = data.get("title") or "No summary available"
+        # Sanitize action_items — owner and task must be non-null strings
         for item in data.get("action_items") or []:
-            if not item.get("owner"):
+            if _is_null_like(item.get("owner")):
                 item["owner"] = "Unknown"
-            if not item.get("task"):
+            if _is_null_like(item.get("task")):
                 item["task"] = "Follow-up required"
             if "is_engineering_task" not in item:
                 item["is_engineering_task"] = False
+            if _is_null_like(item.get("confidence")):
+                item["confidence"] = 1.0
         meeting = ExtractedMeeting.model_validate(data)
     except Exception as exc:
         log.error(
