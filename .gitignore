@@ -18,3 +18,9 @@ backups/
 thumbnails.jpg
 slide-*.jpg
 docs/demo_assets/*.pdf
+
+# graphify knowledge-graph outputs (regenerate with /graphify . --update)
+graphify-out/
+
+# local Claude Code settings
+.claude/

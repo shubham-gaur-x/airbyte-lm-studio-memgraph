@@ -217,6 +217,33 @@ All nodes MUST have `created_at` (ISO datetime) property set on MERGE.
 All nodes have: `id` (uuid5, deterministic) · `created_at` (ISO datetime) · `updated_at`
 Meetings additionally have: `date` · `title` · `kind` · `platform` · `duration_minutes`
 
+### Provenance layer (v5 / Phase 34 — dev-agent → graph)
+
+**Node types:** Ticket · PullRequest · AgentRun (· Commit · FileChange from the GitHub webhook)
+**Edge types:** TICKETED_AS (ActionItem→Ticket) · IMPLEMENTS (AgentRun→Ticket) · PRODUCED (AgentRun→PullRequest) · FOLLOWS_UP_ON (AgentRun→Meeting) · RESOLVED_BY (Ticket→PullRequest, on merge)
+
+`AgentRun` is the "implementation session" bridge node (a dev-agent run). The edge
+vocabulary is deliberately **aligned with Matteo's engagement ontology** (`~/Desktop/ontology`:
+his DevLog `implements` a Feature and `follows_up_on` a Meeting) so our Memgraph graph is
+legible to anyone who knows that ontology. One traversal returns
+`meeting → action item → ticket → agent run → PR`.
+
+Provenance nodes/edges are written ONLY via `memgraph_client.write_run_provenance`
+(run outcome), `memgraph_client.merge_ticket_resolved_by_pr` (merge event), and
+`memgraph_client.write_commits_and_files` (push). Node ids are re-derived to match
+`dev_agent/lifecycle.py` exactly (run=uuid5("dev-agent-run", "KEY#attempt"),
+ticket=uuid5("ticket", key), pr=uuid5("pullrequest", url)) — writer/reader id drift is a known
+past bug class, so never derive these ids anywhere else.
+
+- `transform_service/github_webhook.py` owns GitHub webhook PARSING only — it dispatches to
+  `memgraph_client` and issues no Cypher and no GitHub REST itself. The `/webhook/github`
+  receiver in `main.py` mirrors `/webhook/airbyte`. Join key = the `agent/<KEY>` branch.
+- `dev_agent/self_verify.py` (P8) scores a PR diff against the ticket via `claude_runner.run_oneshot`
+  through the SAME dev-agent backend. This is a sanctioned exception to "extraction is always
+  local" (it scores CODE, not meeting data). It MUST NOT block the In Review transition — a low
+  score only flags the Jira comment and sets `AgentRun.verified=false`.
+- `dev_agent/github_client.py` owns all dev-agent GitHub REST (now `find_open_pr` + `get_pr_diff`).
+
 ---
 
 ## Coding Conventions
@@ -347,6 +374,12 @@ LM_STUDIO_ANTHROPIC_URL=http://host.docker.internal:1234
 DEV_AGENT_LLM_BACKEND=local            # local | claude | openrouter | gemini | groq
 DEV_AGENT_MIN_CONTEXT=32768            # preflight fails fast below this
 ANTHROPIC_API_KEY=                     # required only when DEV_AGENT_LLM_BACKEND=claude
+DEV_AGENT_CLAUDE_MODEL=                # optional, DEV_AGENT_LLM_BACKEND=claude: pin the
+                                       # Anthropic model for cost control (e.g. claude-haiku-4-5).
+                                       # Empty = Claude Code's own default model.
+DEV_AGENT_VERIFY_THRESHOLD=0.6         # P8 self-verify: min confidence to count as "addresses ticket"
+DEV_AGENT_VERIFY_TIMEOUT_SECONDS=180   # P8 self-verify: one-shot scoring call timeout
+GITHUB_WEBHOOK_SECRET=                 # P2 /webhook/github HMAC secret (unset = accept, dev only)
 OPENROUTER_API_KEY=                    # optional, DEV_AGENT_LLM_BACKEND=openrouter
 GEMINI_API_KEY=                        # optional, DEV_AGENT_LLM_BACKEND=gemini
 GROQ_API_KEY=                          # optional, DEV_AGENT_LLM_BACKEND=groq
