@@ -293,6 +293,10 @@ past bug class, so never derive these ids anywhere else.
   producer (Google Meet REST fetch + Cloud Pub/Sub PULL — no inbound tunnel; needs GCP creds,
   disabled no-op without them). Transcript rows are staged via `db.insert_meet_transcript` (SQL only
   in db.py); a different capture source (notetaker) implements the same seam without touching downstream.
+- `process_new_transcripts` and `meet_ingest.pull_and_stage` (via `main._poll_meet_transcripts`, B5) now
+  run on the same 5-minute scheduler interval as the other polls — previously only fired from
+  `/webhook/airbyte`'s background_tasks, so a transcript staged directly by the Pub/Sub-pull consumer
+  had nothing draining it until an unrelated Airbyte sync happened to run.
 
 ---
 
