@@ -14,6 +14,7 @@ from transform_service import action_agent, db, episodic_memory, graph_algorithm
 from transform_service.memory_retrieval import full_memory_query, person_memory_profile
 from transform_service.digest import weekly_digest
 from transform_service.graph_builder import process_new_emails, process_new_events
+from transform_service import github_webhook
 from transform_service.jira_agent import process_jira_issues
 from transform_service.models import AirbyteWebhookPayload
 from transform_service.utils import configure_logging
@@ -149,6 +150,33 @@ async def webhook_airbyte(
 
     log.info("webhook.queued", connection_id=payload.connection_id, job_id=payload.job_id)
     return {"status": "queued", "connection_id": payload.connection_id}
+
+
+@app.post("/webhook/github")
+async def webhook_github(request: Request, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """Sync GitHub merge / push data back into the provenance graph (P2).
+
+    HMAC-verified with GITHUB_WEBHOOK_SECRET when set (unset = accept, dev default). The
+    actual graph write runs in the background so GitHub gets a fast 200.
+    """
+    import json as _json
+
+    raw = await request.body()
+    if not github_webhook.verify_signature(
+        raw, request.headers.get("X-Hub-Signature-256"), os.environ.get("GITHUB_WEBHOOK_SECRET")
+    ):
+        log.warning("webhook.github.bad_signature")
+        raise HTTPException(status_code=401, detail="bad signature")
+
+    event = request.headers.get("X-GitHub-Event", "")
+    try:
+        payload = _json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bad json")
+
+    background_tasks.add_task(github_webhook.handle_event, event, payload)
+    log.info("webhook.github.queued", event=event)
+    return {"status": "queued", "event": event}
 
 
 @app.get("/health")

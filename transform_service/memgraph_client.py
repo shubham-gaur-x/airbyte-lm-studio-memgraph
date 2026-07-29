@@ -311,6 +311,141 @@ async def merge_ticket_resolved_by_pr(
     return {"ticket_id": ticket_id, "pr_id": pr_id}
 
 
+async def write_run_provenance(
+    ticket_key: str,
+    attempt: int,
+    pr_url: str,
+    pr_number: Optional[int] = None,
+    branch: str = "",
+    ticket_summary: str = "",
+    status: str = "pr_opened",
+    verified: Optional[bool] = None,
+) -> Dict[str, str]:
+    """Record a dev-agent run's provenance in one ACID transaction (P2).
+
+    Writes the ``AgentRun`` bridge node (the DevLog-equivalent from Matteo's ontology)
+    and connects it, using his predicate vocabulary, so one traversal returns
+    meeting -> action item -> ticket -> agent run -> PR:
+
+      (AgentRun)-[:IMPLEMENTS]->(Ticket)          # his DevLog `implements` Feature
+      (AgentRun)-[:PRODUCED]->(PullRequest)       # our plan
+      (AgentRun)-[:FOLLOWS_UP_ON]->(Meeting)      # his DevLog `follows_up_on` Meeting
+      (ActionItem)-[:TICKETED_AS]->(Ticket)       # stitches meeting-side to dev-agent-side
+
+    Node ids are re-derived to match dev_agent/lifecycle.py exactly (writer/reader parity
+    is a known past bug class): run=uuid5("dev-agent-run", f"{key}#{attempt}"),
+    ticket=uuid5("ticket", key), pr=uuid5("pullrequest", url). ``verified`` carries the
+    P8 self-verification verdict (None = not checked yet).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    run_id = uuid5_id("dev-agent-run", f"{ticket_key}#{attempt}")
+    ticket_id = uuid5_id("ticket", ticket_key)
+    pr_id = uuid5_id("pullrequest", pr_url)
+
+    driver = get_driver()
+    async with driver.session() as session:
+        async with await session.begin_transaction() as tx:
+            await tx.run(
+                """
+                MERGE (t:Ticket {id: $ticket_id})
+                ON CREATE SET t.created_at = $now
+                SET t.key = $key, t.summary = $summary, t.updated_at = $now
+
+                MERGE (pr:PullRequest {id: $pr_id})
+                ON CREATE SET pr.created_at = $now
+                SET pr.url = $pr_url, pr.number = $pr_number, pr.branch = $branch,
+                    pr.updated_at = $now
+
+                MERGE (run:AgentRun {id: $run_id})
+                ON CREATE SET run.created_at = $now
+                SET run.ticket_key = $key, run.attempt = $attempt, run.status = $status,
+                    run.branch = $branch, run.verified = $verified, run.updated_at = $now
+
+                MERGE (run)-[:IMPLEMENTS]->(t)
+                MERGE (run)-[:PRODUCED]->(pr)
+                """,
+                ticket_id=ticket_id, pr_id=pr_id, run_id=run_id, key=ticket_key,
+                summary=ticket_summary, pr_url=pr_url, pr_number=pr_number, branch=branch,
+                attempt=attempt, status=status, verified=verified, now=now,
+            )
+            # Stitch the meeting-side graph to the dev-agent-side graph, and mirror
+            # his DevLog->Meeting `follows_up_on` shortcut. Both are OPTIONAL: a ticket
+            # may exist with no extracted ActionItem (e.g. a human-created ticket).
+            await tx.run(
+                """
+                MATCH (t:Ticket {id: $ticket_id})
+                MATCH (run:AgentRun {id: $run_id})
+                OPTIONAL MATCH (a:ActionItem {jira_key: $key})
+                FOREACH (_ IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END |
+                    MERGE (a)-[:TICKETED_AS]->(t)
+                )
+                WITH run, a
+                OPTIONAL MATCH (m:Meeting)-[:FOLLOWS_UP]->(a)
+                FOREACH (_ IN CASE WHEN m IS NOT NULL THEN [1] ELSE [] END |
+                    MERGE (run)-[:FOLLOWS_UP_ON]->(m)
+                )
+                """,
+                ticket_id=ticket_id, run_id=run_id, key=ticket_key,
+            )
+            await tx.commit()
+
+    log.info(
+        "memgraph.run_provenance_written",
+        ticket_key=ticket_key, attempt=attempt, pr_url=pr_url,
+        run_id=run_id, ticket_id=ticket_id, pr_id=pr_id, verified=verified,
+    )
+    return {"run_id": run_id, "ticket_id": ticket_id, "pr_id": pr_id}
+
+
+async def write_commits_and_files(branch: str, commits: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Attach commits + file changes from a GitHub push to the branch's PullRequest node (P2).
+
+    One ACID transaction. FileChange ids are (sha, path)-scoped so the same path across two
+    commits stays two distinct nodes. Commits whose branch has no PullRequest node yet are a
+    no-op (the MATCH yields no rows) — provenance must run first (it creates the PR node).
+    """
+    if not commits:
+        return {"commits": 0, "files": 0}
+    now = datetime.now(timezone.utc).isoformat()
+    n_files = 0
+    driver = get_driver()
+    async with driver.session() as session:
+        async with await session.begin_transaction() as tx:
+            for c in commits:
+                sha = c.get("sha", "")
+                if not sha:
+                    continue
+                files = [
+                    {
+                        "id": uuid5_id("filechange", f"{sha}:{f['path']}"),
+                        "path": f["path"],
+                        "change_type": f.get("change_type", "modified"),
+                    }
+                    for f in c.get("files", [])
+                ]
+                n_files += len(files)
+                await tx.run(
+                    """
+                    MATCH (pr:PullRequest {branch: $branch})
+                    MERGE (commit:Commit {sha: $sha})
+                    ON CREATE SET commit.created_at = $now
+                    SET commit.message = $message, commit.updated_at = $now
+                    MERGE (pr)-[:CONTAINS]->(commit)
+                    WITH commit
+                    UNWIND $files AS f
+                        MERGE (fc:FileChange {id: f.id})
+                        ON CREATE SET fc.created_at = $now
+                        SET fc.path = f.path, fc.change_type = f.change_type, fc.updated_at = $now
+                        MERGE (commit)-[:MODIFIES]->(fc)
+                    """,
+                    branch=branch, sha=sha, message=(c.get("message", "") or "")[:1000],
+                    files=files, now=now,
+                )
+            await tx.commit()
+    log.info("memgraph.commits_written", branch=branch, commits=len(commits), files=n_files)
+    return {"commits": len(commits), "files": n_files}
+
+
 async def migrate_schema_v5(extractor_version: str = "v5") -> Dict[str, int]:
     """Phase 32 additive migration — idempotent (MERGE-only), safe to re-run.
 
@@ -332,6 +467,9 @@ async def migrate_schema_v5(extractor_version: str = "v5") -> Dict[str, int]:
     new_constraints = [
         "CREATE CONSTRAINT ON (t:Ticket) ASSERT t.id IS UNIQUE",
         "CREATE CONSTRAINT ON (pr:PullRequest) ASSERT pr.id IS UNIQUE",
+        "CREATE CONSTRAINT ON (run:AgentRun) ASSERT run.id IS UNIQUE",
+        "CREATE CONSTRAINT ON (c:Commit) ASSERT c.sha IS UNIQUE",
+        "CREATE CONSTRAINT ON (fc:FileChange) ASSERT fc.id IS UNIQUE",
         "CREATE CONSTRAINT ON (tm:Team) ASSERT tm.name IS UNIQUE",
         "CREATE CONSTRAINT ON (pj:Project) ASSERT pj.key IS UNIQUE",
     ]
