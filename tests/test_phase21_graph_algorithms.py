@@ -52,8 +52,17 @@ async def test_run_fast_algorithms_calls_all_five():
 
 
 @pytest.mark.anyio
-async def test_run_fast_algorithms_one_failure_does_not_abort_others():
-    """If pagerank fails, the other four algorithms must still run."""
+async def test_run_fast_algorithms_one_failure_does_not_abort_others(monkeypatch):
+    """If pagerank fails, the other four algorithms must still run.
+
+    pagerank fails on every attempt here (a permanent failure, not the transient
+    write-conflict @with_retry on _run_one exists for), so it is called twice (1 initial +
+    1 retry) before _run_algorithms gives up on it and moves on -- 4 algorithms x 1 + 1
+    algorithm x 2 retries = 6 total session.run calls.
+    """
+    import asyncio as _asyncio
+    monkeypatch.setattr(_asyncio, "sleep", AsyncMock())  # skip the real retry backoff
+
     call_count = 0
 
     async def run_side_effect(cypher, **kwargs):
@@ -70,7 +79,7 @@ async def test_run_fast_algorithms_one_failure_does_not_abort_others():
     with patch("transform_service.graph_algorithms.memgraph_client.get_driver", return_value=driver):
         result = await graph_algorithms.run_fast_algorithms()
 
-    assert session.run.call_count == 5
+    assert session.run.call_count == 6
     assert result["results"]["pagerank"].startswith("failed:")
     for algo in ["community_detection", "betweenness_centrality", "degree_centrality", "wcc"]:
         assert result["results"][algo] == "ok"
@@ -95,10 +104,17 @@ async def test_run_full_algorithms_uses_leiden():
     assert any("igraphalg.community_leiden" in c for c in cypher_calls)
     # Regular community_detection.get() must NOT appear in the full run
     assert not any("community_detection.get()" in c for c in cypher_calls)
+    # Regression: the CPM default (resolution_parameter=1) over-fragments a sparse graph
+    # into all-singleton communities (confirmed live: 308/308 size-1 communities on this
+    # graph, on the scheduled nightly job) -- must explicitly request modularity instead.
+    assert any('"modularity"' in c for c in cypher_calls)
 
 
 @pytest.mark.anyio
-async def test_run_full_algorithms_individual_failure_continues():
+async def test_run_full_algorithms_individual_failure_continues(monkeypatch):
+    import asyncio as _asyncio
+    monkeypatch.setattr(_asyncio, "sleep", AsyncMock())  # skip the real retry backoff
+
     async def run_side_effect(cypher, **kwargs):
         if "betweenness_centrality" in cypher:
             raise RuntimeError("bc failed")

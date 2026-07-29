@@ -9,7 +9,7 @@ from neo4j import AsyncGraphDatabase, AsyncDriver
 
 from transform_service import person_resolver
 from transform_service.models import ExtractedMeeting
-from transform_service.utils import uuid5_id
+from transform_service.utils import uuid5_id, with_retry
 
 log = structlog.get_logger()
 _driver: Optional[AsyncDriver] = None
@@ -80,6 +80,7 @@ async def get_known_people() -> List[Dict[str, Any]]:
         return [dict(r) async for r in result]
 
 
+@with_retry(max_attempts=3, base_delay=1.0)
 async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str:
     now = datetime.now(timezone.utc).isoformat()
     meeting_id = uuid5_id("meeting", source_id)
@@ -178,9 +179,15 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                     meeting_id=meeting_id, now=now,
                 )
 
-            # Topic nodes + DISCUSSED edges
+            # Topic nodes + DISCUSSED edges. MERGE key is normalized (lowercase+strip) to
+            # match topic_id's existing normalization — using the raw-case name as the
+            # MERGE key here used to create a second Topic node (and a colliding .id, since
+            # two case variants hash to the same uuid5) for every case variant, fragmenting
+            # a single real topic across nodes and understating it in every insight query
+            # (bridges/communities/pagerank all key off these nodes).
             for topic_name in meeting.topics:
-                topic_id = uuid5_id("topic", topic_name.lower().strip())
+                norm_name = topic_name.lower().strip()
+                topic_id = uuid5_id("topic", norm_name)
                 await tx.run(
                     """
                     MERGE (t:Topic {name: $name})
@@ -191,7 +198,7 @@ async def upsert_meeting_graph(meeting: ExtractedMeeting, source_id: str) -> str
                     MATCH (m:Meeting {id: $meeting_id})
                     MERGE (m)-[:DISCUSSED]->(t)
                     """,
-                    name=topic_name,
+                    name=norm_name,
                     topic_id=topic_id,
                     meeting_id=meeting_id,
                     now=now,
@@ -369,6 +376,7 @@ async def update_action_jira_status(jira_key: str, status: str) -> bool:
         return summary.counters.properties_set > 0
 
 
+@with_retry(max_attempts=3, base_delay=1.0)
 async def merge_blocker(
     description: str,
     ticket_key: Optional[str] = None,
@@ -412,6 +420,7 @@ async def merge_blocker(
     return blocker_id
 
 
+@with_retry(max_attempts=3, base_delay=1.0)
 async def merge_ticket_resolved_by_pr(
     ticket_key: str,
     pr_url: str,
@@ -466,6 +475,7 @@ async def merge_ticket_resolved_by_pr(
     return {"ticket_id": ticket_id, "pr_id": pr_id}
 
 
+@with_retry(max_attempts=3, base_delay=1.0)
 async def write_run_provenance(
     ticket_key: str,
     attempt: int,
@@ -552,6 +562,7 @@ async def write_run_provenance(
     return {"run_id": run_id, "ticket_id": ticket_id, "pr_id": pr_id}
 
 
+@with_retry(max_attempts=3, base_delay=1.0)
 async def write_commits_and_files(branch: str, commits: List[Dict[str, Any]]) -> Dict[str, int]:
     """Attach commits + file changes from a GitHub push to the branch's PullRequest node (P2).
 
@@ -853,7 +864,7 @@ async def get_topic_graph(name: str) -> Dict[str, Any]:
             RETURN t.name AS name,
                    collect(DISTINCT {id: m.id, title: m.title, date: m.date}) AS meetings
             """,
-            name=name,
+            name=name.strip().lower(),  # match the write-side normalization
         )
         records = [dict(r) async for r in result]
         return records[0] if records else {}
@@ -1083,7 +1094,7 @@ async def get_influential_nodes(label: str = "Person", limit: int = 10) -> List[
             MATCH (n:{label})
             WHERE n.pagerank_score IS NOT NULL {tracked_gate}
             RETURN n.id AS id,
-                   COALESCE(n.name, n.email, n.name) AS name,
+                   COALESCE(n.name, n.title, n.task, n.text, n.summary, n.email) AS name,
                    n.pagerank_score AS pagerank_score,
                    n.community_id AS community_id
             ORDER BY n.pagerank_score DESC
@@ -1103,7 +1114,7 @@ async def get_community_members(community_id: int) -> List[Dict[str, Any]]:
             MATCH (n)
             WHERE n.community_id = $community_id
             RETURN n.id AS id,
-                   COALESCE(n.name, n.email) AS name,
+                   COALESCE(n.name, n.title, n.task, n.text, n.summary, n.email) AS name,
                    labels(n) AS labels,
                    n.pagerank_score AS pagerank_score
             """,
@@ -1121,7 +1132,7 @@ async def get_bridge_nodes(limit: int = 10) -> List[Dict[str, Any]]:
             MATCH (n)
             WHERE n.betweenness_centrality IS NOT NULL
             RETURN n.id AS id,
-                   COALESCE(n.name, n.email) AS name,
+                   COALESCE(n.name, n.title, n.task, n.text, n.summary, n.email) AS name,
                    labels(n) AS labels,
                    n.betweenness_centrality AS betweenness_centrality,
                    n.community_id AS community_id
@@ -1141,7 +1152,7 @@ async def get_node_insights(node_id: str) -> Dict[str, Any]:
             """
             MATCH (n {id: $id})
             RETURN n.id AS id,
-                   COALESCE(n.name, n.email) AS name,
+                   COALESCE(n.name, n.title, n.task, n.text, n.summary, n.email) AS name,
                    labels(n) AS labels,
                    n.pagerank_score AS pagerank_score,
                    n.community_id AS community_id,
