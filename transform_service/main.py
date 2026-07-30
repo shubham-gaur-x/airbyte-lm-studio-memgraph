@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -64,6 +66,18 @@ async def _poll_meet_transcripts() -> None:
     (meet_ingest.pull_and_stage's own disabled-safe-default), so scheduling this
     unconditionally is harmless without live GCP creds."""
     await meet_ingest.pull_and_stage(process=process_new_transcripts)
+
+
+def _get_git_commit_sha() -> str:
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        ).strip()
+        return sha
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
 
 
 @asynccontextmanager
@@ -219,6 +233,16 @@ async def health() -> Dict[str, Any]:
         "lm_studio": lm_ok,
         "memgraph": mg_ok,
         "postgres": pg_ok,
+    }
+
+
+@app.get("/version")
+async def version() -> Dict[str, Any]:
+    git_commit_sha = _get_git_commit_sha()
+    timestamp = datetime.now(timezone.utc).isoformat()
+    return {
+        "git_commit_sha": git_commit_sha,
+        "timestamp": timestamp,
     }
 
 
